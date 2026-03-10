@@ -12,8 +12,8 @@ const getJiraHeaders = (email, apiToken) => {
     'Authorization': `Basic ${auth}`,
     'Accept': 'application/json',
     'Content-Type': 'application/json',
-    'X-Atlassian-Token': 'no-check', // Obligatorio para evitar XSRF en proxies/navegadores
-    'X-Requested-With': 'XMLHttpRequest' // Refuerzo para evitar bloqueos de seguridad
+    'X-Atlassian-Token': 'no-check',
+    'X-Requested-With': 'XMLHttpRequest'
   };
 };
 
@@ -83,32 +83,109 @@ export const logJiraWorklog = async (email, apiToken, issueKey, comment, date, t
 };
 
 /**
+ * Obtiene las horas totales imputadas por el usuario en una fecha específica
+ */
+export const fetchJiraWorklogs = async (email, apiToken, date) => {
+  try {
+    // 1. Obtener los datos del usuario actual para tener su accountId
+    const myself = await validateJiraConnection(email, apiToken);
+    const accountId = myself.accountId;
+
+    // 2. Formatear la fecha para JQL: YYYY-MM-DD (usando componentes locales para evitar desfase de zona horaria)
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const dateStr = `${year}-${month}-${day}`;
+    console.log(`[JiraSync] Buscando horas para la fecha: ${dateStr} (Local)`);
+
+    // 3. Buscar issues donde el usuario haya imputado horas ese día
+    // Migración a la nueva API /search/jql (POST) para evitar error 410 Gone
+    const jql = `worklogDate = "${dateStr}" AND worklogAuthor = "${accountId}"`;
+    console.log(`[JiraSync] JQL: ${jql}`);
+
+    const searchResponse = await axios.post(
+      `${JIRA_API_URL}/rest/api/3/search/jql`,
+      {
+        jql: jql,
+        fields: ["key"],
+        maxResults: 100
+      },
+      { headers: getJiraHeaders(email, apiToken) }
+    );
+
+    const issues = searchResponse.data.issues || [];
+    console.log(`[JiraSync] Issues encontrados: ${issues.length}`);
+    let totalSeconds = 0;
+
+    // 4. Para cada issue, obtener sus worklogs y filtrar los del usuario y fecha
+    for (const issue of issues) {
+      const worklogResponse = await axios.get(
+        `${JIRA_API_URL}/rest/api/3/issue/${issue.key}/worklog`,
+        { headers: getJiraHeaders(email, apiToken) }
+      );
+
+      const worklogs = worklogResponse.data.worklogs || [];
+      worklogs.forEach(wl => {
+        const wlDate = wl.started.split('T')[0];
+        if (wlDate === dateStr && (wl.author.accountId === accountId || wl.author.emailAddress === email)) {
+          totalSeconds += wl.timeSpentSeconds;
+        }
+      });
+    }
+
+    return totalSeconds / 3600; // Retornar en horas
+  } catch (error) {
+    if (error.response) {
+      console.error("Jira API Error Response Full:", {
+        status: error.response.status,
+        headers: error.response.headers,
+        data: error.response.data,
+        message: error.response.data?.errorMessages || error.response.data?.errors
+      });
+    }
+    console.error("Error fetching Jira worklogs:", error);
+    throw error;
+  }
+};
+
+/**
  * Busca issues en Jira para el autocompletado
  */
 export const searchJiraIssues = async (email, apiToken, query) => {
   if (!query || query.length < 2) return [];
 
   try {
-    const response = await axios.get(
-      `${JIRA_API_URL}/rest/api/3/issue/picker?query=${encodeURIComponent(query)}&currentJQL=order%20by%20lastViewed%20DESC`,
-      {
-        headers: getJiraHeaders(email, apiToken)
-      }
-    );
+    const url = `${JIRA_API_URL}/rest/api/3/issue/picker?query=${encodeURIComponent(query)}&currentJQL=order%20by%20lastViewed%20DESC`;
+    console.log(`[JiraAutocomplete] Buscando: "${query}" - URL: ${url}`);
 
-    const results = [];
-    response.data.sections.forEach(section => {
-      section.issues.forEach(issue => {
-        results.push({
-          key: issue.key,
-          summary: issue.summaryText,
-          html: issue.summary
-        });
-      });
+    const response = await axios.get(url, {
+      headers: getJiraHeaders(email, apiToken)
     });
 
+    console.log(`[JiraAutocomplete] Respuesta recibida:`, response.data);
+
+    const results = [];
+    if (response.data && response.data.sections) {
+      response.data.sections.forEach(section => {
+        section.issues.forEach(issue => {
+          results.push({
+            key: issue.key,
+            summary: issue.summaryText,
+            html: issue.summary
+          });
+        });
+      });
+    }
+
+    console.log(`[JiraAutocomplete] Resultados parseados: ${results.length}`);
     return results;
   } catch (error) {
+    if (error.response) {
+      console.error("[JiraAutocomplete] Error Response:", {
+        status: error.response.status,
+        data: error.response.data
+      });
+    }
     console.error("Error searching issues:", error);
     return [];
   }
@@ -124,9 +201,7 @@ export const formatReportEmail = (day, activities) => {
 
   activities.forEach(act => {
     if (act.issueKey && act.report) {
-      const hours = parseFloat(act.hours) || 0;
-      totalHours += hours;
-      body += `- [${act.issueKey}] (${hours}h): ${act.report}\n`;
+      body += `- ${act.report}\n`;
     }
   });
 
@@ -141,8 +216,7 @@ export const formatActivitySnippet = (activities) => {
   let snippet = '';
   activities.forEach(act => {
     if (act.issueKey && act.report) {
-      const hours = parseFloat(act.hours) || 0;
-      snippet += `- [${act.issueKey}] (${hours}h): ${act.report}\n`;
+      snippet += `- ${act.report}\n`;
     }
   });
   return snippet;

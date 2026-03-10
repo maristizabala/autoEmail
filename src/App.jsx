@@ -4,7 +4,15 @@ import {
   CircleX, Clock, CircleAlert, LogIn, LogOut, Home, User, Briefcase, Bell,
   LayoutPanelLeft, ChevronRight, EllipsisVertical, Calendar, Send, Settings
 } from 'lucide-react'
-import { logJiraWorklog, formatReportEmail, formatActivitySnippet, getWeekDays, searchJiraIssues, validateJiraConnection } from './services/reportService'
+import {
+  validateJiraConnection,
+  logJiraWorklog,
+  getWeekDays,
+  formatReportEmail,
+  formatActivitySnippet,
+  fetchJiraWorklogs,
+  searchJiraIssues
+} from './services/reportService';
 import { useMsal, useIsAuthenticated } from "@azure/msal-react"
 import { loginRequest, sendOutlookEmail } from './services/outlookService'
 
@@ -150,8 +158,22 @@ function App() {
     const baseBody = formatReportEmail(selectedDay, [])
     setEditableBody(baseBody)
     setActivities([{ issueKey: '', report: '', hours: '1' }])
-    setTotalDayHours(0) // Resetear contador al cambiar de día
-  }, [selectedDay])
+
+    // Cargar horas automáticamente desde Jira si tenemos conexión
+    const loadHoursFromJira = async () => {
+      if (config.jiraEmail && config.jiraToken && connectionStatus === 'success') {
+        try {
+          const hours = await fetchJiraWorklogs(config.jiraEmail, config.jiraToken, selectedDay)
+          setTotalDayHours(hours)
+        } catch (error) {
+          console.error("No se pudieron cargar las horas de Jira:", error)
+        }
+      } else {
+        setTotalDayHours(0)
+      }
+    }
+    loadHoursFromJira()
+  }, [selectedDay, connectionStatus, config.jiraEmail, config.jiraToken])
 
   useEffect(() => {
     localStorage.setItem('syncronic_config', JSON.stringify(config))
@@ -255,9 +277,13 @@ function App() {
     }
     setLoading(true)
     try {
-      for (const activity of validActivities) {
-        const seconds = Math.round((parseFloat(activity.hours) || 1) * 3600)
-        await logJiraWorklog(config.jiraEmail, config.jiraToken, activity.issueKey, activity.report, selectedDay, seconds)
+      if (connectionStatus === 'success') {
+        for (const activity of validActivities) {
+          const seconds = Math.round((parseFloat(activity.hours) || 1) * 3600)
+          await logJiraWorklog(config.jiraEmail, config.jiraToken, activity.issueKey, activity.report, selectedDay, seconds)
+        }
+      } else {
+        console.warn("Jira no está conectado. Solo se actualizará el reporte local.")
       }
 
       // Obtener el fragmento de texto formateado
@@ -279,9 +305,9 @@ function App() {
       // Limpiar las tablas de actividad
       setActivities([{ issueKey: '', report: '', hours: '1' }])
 
-      // Actualizar el contador de horas del día
-      const addedHours = validActivities.reduce((sum, act) => sum + (parseFloat(act.hours) || 0), 0)
-      setTotalDayHours(prev => prev + addedHours)
+      // Actualizar el contador de horas del día llamando a Jira de nuevo para asegurar precisión
+      const hours = await fetchJiraWorklogs(config.jiraEmail, config.jiraToken, selectedDay)
+      setTotalDayHours(hours)
 
       alert("¡Éxito! Horas imputadas en Jira y añadidas al reporte.")
     } catch (error) {
@@ -378,7 +404,7 @@ function App() {
             )}
           </div>
           <div style={{ display: 'flex', gap: '0.75rem' }}>
-            <button className="btn btn-primary" onClick={handleJiraSync} disabled={loading || connectionStatus !== 'success'}>
+            <button className="btn btn-primary" onClick={handleJiraSync} disabled={loading}>
               <Send size={16} /> IMPUTAR HORAS
             </button>
           </div>
