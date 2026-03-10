@@ -140,7 +140,8 @@ function App() {
 
   const [config, setConfig] = useState(() => {
     const saved = localStorage.getItem('syncronic_config')
-    return saved ? JSON.parse(saved) : { jiraEmail: '', jiraToken: '', emailRecipient: '', outlookClientId: '' }
+    const baseConfig = { jiraEmail: '', jiraToken: '', emailRecipient: 'qa_global@latinia.com', emailCc: '', outlookClientId: '' }
+    return saved ? { ...baseConfig, ...JSON.parse(saved) } : baseConfig
   })
 
   // Nuevos estados para recordatorios
@@ -181,12 +182,14 @@ function App() {
 
   useEffect(() => {
     localStorage.setItem('syncronic_reminders', JSON.stringify(reminderSettings))
+  }, [reminderSettings])
 
-    // Solicitar permiso si se activa la funcionalidad
-    if (reminderSettings.enabled && Notification.permission === 'default') {
+  const handleToggleReminders = (enabled) => {
+    if (enabled && Notification.permission === 'default') {
       Notification.requestPermission()
     }
-  }, [reminderSettings])
+    setReminderSettings({ ...reminderSettings, enabled })
+  }
 
   // Lógica de notificaciones en segundo plano
   useEffect(() => {
@@ -201,33 +204,44 @@ function App() {
       shiftEnd.setHours(shiftH, shiftM, 0, 0)
       const tenMinsBefore = new Date(shiftEnd.getTime() - 10 * 60000)
 
-      // Si estamos en el minuto exacto de los 10 min antes
-      if (now.getHours() === tenMinsBefore.getHours() && now.getMinutes() === tenMinsBefore.getMinutes()) {
+      // Debugging: console.log(`Chequeo Recordatorios: ${now.toLocaleTimeString()} - Fin: ${shiftEnd.toLocaleTimeString()}`)
+
+      // Si estamos en el minuto exacto de los 10 min antes (solo al segundo 0)
+      if (now.getHours() === tenMinsBefore.getHours() && 
+          now.getMinutes() === tenMinsBefore.getMinutes() && 
+          now.getSeconds() < 1) {
         if (Notification.permission === 'granted') {
+          console.log("Trigger: Notificación de 10 min antes.")
           new Notification("¡Faltan 10 minutos!", {
             body: "Es hora de completar tu reporte y enviar el correo de fin de jornada.",
             icon: "/logo.png"
           })
+        } else {
+          console.warn("Permiso de notificación no otorgado para aviso de 10 min.")
         }
       }
 
       // 2. Notificación periódica (cada X minutos)
-      // Usamos el residuo para saber si toca notificar (solo al inicio del minuto)
       const minutesPastMidnight = now.getHours() * 60 + now.getMinutes()
       if (minutesPastMidnight % reminderSettings.interval === 0 && now.getSeconds() < 1) {
-        // Evitamos enviar si es muy cerca de la hora de salida (para no duplicar avisos)
         const diffToFinish = (shiftEnd.getTime() - now.getTime()) / 60000
-        if (diffToFinish > 15 && Notification.permission === 'granted') {
-          new Notification("Recordatorio Syncronic", {
-            body: "¿Tienes actividades pendientes por imputar? Aprovecha ahora.",
-            icon: "/logo.png"
-          })
+        // Solo avisar si falta más de 15 min para salir Y si no ha llegado a las 8 horas
+        if (diffToFinish > 15 && totalDayHours < 8) {
+          if (Notification.permission === 'granted') {
+            console.log("Trigger: Notificación periódica.")
+            new Notification("Recordatorio Syncronic", {
+              body: "¿Tienes actividades pendientes por imputar? Aprovecha ahora.",
+              icon: "/logo.png"
+            })
+          } else {
+            console.warn("Permiso de notificación no otorgado para aviso periódico.")
+          }
         }
       }
-    }, 1000) // Revisar cada segundo para precisión, pero con filtros por minuto
+    }, 1000)
 
     return () => clearInterval(checkInterval)
-  }, [reminderSettings])
+  }, [reminderSettings, totalDayHours])
 
   const updateActivity = (index, newData) => {
     const nextArr = [...activities]
@@ -320,13 +334,30 @@ function App() {
 
   const handleSendEmail = async (method) => {
     // Enviar el contenido ACTUAL del editor (que es lo acumulado)
-    if (!editableBody.includes('- [')) {
+    const baseEmpty = formatReportEmail(selectedDay, [])
+    if (editableBody.trim() === baseEmpty.trim() || editableBody.length < 30) {
       alert("El reporte parece estar vacío. Imputa horas primero o escribe manualmente.")
       return
     }
     setLoading(true)
     try {
-      const subject = `Reporte Diario - ${selectedDay.toLocaleDateString()}`
+      // Calcular fecha de hoy para el reporte
+      const todayStr = selectedDay.toLocaleDateString()
+      
+      // Calcular fecha del "Plan" (Mañana, o Lunes si es viernes/fin de semana)
+      const planDay = new Date(selectedDay)
+      const dayOfWeek = planDay.getDay() // 0=Dom, 5=Vie, 6=Sab
+      
+      if (dayOfWeek === 5) { // Viernes -> Sumar 3 días para Lunes
+        planDay.setDate(planDay.getDate() + 3)
+      } else if (dayOfWeek === 6) { // Sábado -> Sumar 2 días para Lunes
+        planDay.setDate(planDay.getDate() + 2)
+      } else { // Otros días -> Sumar 1 día
+        planDay.setDate(planDay.getDate() + 1)
+      }
+      const planStr = planDay.toLocaleDateString()
+
+      const subject = `Reporte ${todayStr} - Plan ${planStr}`
       if (method === 'outlook' && isAuthenticated) {
         const tokenResp = await instance.acquireTokenSilent({ ...loginRequest, account: accounts[0] })
         await sendOutlookEmail(tokenResp.accessToken, config.emailRecipient, subject, editableBody)
@@ -335,20 +366,35 @@ function App() {
         const baseBody = formatReportEmail(selectedDay, [])
         setEditableBody(baseBody)
       } else {
-        // Para mailto, COPIAMOS primero al portapapeles por seguridad
-        try {
-          await navigator.clipboard.writeText(editableBody)
-          // No limpiamos el editor para evitar pérdida de datos si el mailto falla
-          window.location.href = `mailto:${config.emailRecipient}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(editableBody)}`
-          alert("Se ha copiado el reporte al portapapeles y se intentará abrir tu correo.")
-        } catch (err) {
-          console.error('Error al copiar:', err)
-          window.location.href = `mailto:${config.emailRecipient}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(editableBody)}`
+        // Para mailto, preparamos la URL primero para dispararla inmediatamente
+        const subjectEnc = encodeURIComponent(subject)
+        const ccEnc = encodeURIComponent(config.emailCc || '')
+        const bodyEnc = encodeURIComponent(editableBody)
+        
+        let mailtoUrl = `mailto:${config.emailRecipient}?cc=${ccEnc}&subject=${subjectEnc}&body=${bodyEnc}`
+        
+        if (mailtoUrl.length > 2000) {
+          console.warn("Mailto URL too long, falling back to clipboard-only body.")
+          const shortBody = encodeURIComponent("El reporte ha sido copiado al portapapeles. Pégalo aquí (Ctrl+V).")
+          mailtoUrl = `mailto:${config.emailRecipient}?cc=${ccEnc}&subject=${subjectEnc}&body=${shortBody}`
         }
+
+        // Ejecutar mailto de forma síncrona al click para evitar bloqueos del navegador
+        window.location.href = mailtoUrl
+
+        // Intentar copiar al portapapeles en segundo plano
+        navigator.clipboard.writeText(editableBody)
+          .then(() => {
+            console.log("Reporte copiado al portapapeles exitosamente.")
+            alert("Se ha copiado el reporte al portapapeles y se ha solicitado abrir tu correo.")
+          })
+          .catch(err => {
+            console.error('Error al copiar al portapapeles:', err)
+          })
       }
     } catch (error) {
       console.error(error)
-      alert("Error al enviar el correo. Revisa la consola.")
+      alert("Error al procesar el envío. Revisa la consola.")
     } finally {
       setLoading(false)
     }
@@ -524,8 +570,12 @@ function App() {
                       <input type="text" name="outlookClientId" value={config.outlookClientId} onChange={handleConfigChange} />
                     </div>
                     <div className="input-group">
-                      <label>Destinatario</label>
-                      <input type="text" name="emailRecipient" value={config.emailRecipient} onChange={handleConfigChange} />
+                      <label>Destinatario (Para)</label>
+                      <input type="text" name="emailRecipient" value={config.emailRecipient} onChange={handleConfigChange} placeholder="ejemplo@empresa.com" />
+                    </div>
+                    <div className="input-group">
+                      <label>CC (Separados por coma)</label>
+                      <input type="text" name="emailCc" value={config.emailCc || ''} onChange={handleConfigChange} placeholder="equipo@empresa.com, jefe2@empresa.com" />
                     </div>
                   </div>
                 </div>
@@ -545,7 +595,7 @@ function App() {
                       <input
                         type="checkbox"
                         checked={reminderSettings.enabled}
-                        onChange={(e) => setReminderSettings({ ...reminderSettings, enabled: e.target.checked })}
+                        onChange={(e) => handleToggleReminders(e.target.checked)}
                       />
                       <span style={{ fontSize: '0.9rem', fontWeight: 600 }}>Activar recordatorios automáticos</span>
                     </label>
