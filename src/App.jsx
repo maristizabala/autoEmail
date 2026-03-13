@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import {
   CircleCheck, Mail, Clipboard, Terminal, Search, Loader2, Plus, Trash2,
   CircleX, Clock, CircleAlert, LogIn, LogOut, Home, User, Briefcase, Bell,
-  LayoutPanelLeft, ChevronRight, EllipsisVertical, Calendar, Send, Settings
+  LayoutPanelLeft, ChevronRight, EllipsisVertical, Calendar, Send, Settings, History, Edit3, Check, Save, X
 } from 'lucide-react'
 import {
   validateJiraConnection,
@@ -11,10 +11,11 @@ import {
   formatReportEmail,
   formatActivitySnippet,
   fetchJiraWorklogs,
+  fetchDetailedWorklogs,
+  updateJiraWorklog,
+  deleteJiraWorklog,
   searchJiraIssues
 } from './services/reportService';
-import { useMsal, useIsAuthenticated } from "@azure/msal-react"
-import { loginRequest, sendOutlookEmail } from './services/outlookService'
 
 function ActivityRow({ index, activity, updateActivity, removeActivity, config }) {
   const [suggestions, setSuggestions] = useState([])
@@ -125,9 +126,158 @@ function ActivityRow({ index, activity, updateActivity, removeActivity, config }
   )
 }
 
+function HistoryEntry({ worklog, onUpdate, onDelete, config }) {
+  const [isEditing, setIsEditing] = useState(false)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [editValues, setEditValues] = useState({
+    comment: worklog.comment,
+    hours: worklog.timeSpentSeconds / 3600
+  })
+  const [loading, setLoading] = useState(false)
+
+  const handleSave = async () => {
+    setLoading(true)
+    try {
+      const seconds = Math.round(parseFloat(editValues.hours) * 3600)
+      await onUpdate(worklog.issueKey, worklog.id, editValues.comment, seconds)
+      setIsEditing(false)
+    } catch (e) {
+      alert("Error al actualizar")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleDelete = async () => {
+    setLoading(true)
+    try {
+      await onDelete(worklog.issueKey, worklog.id)
+      setShowDeleteConfirm(false)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="card fade-in" style={{ marginBottom: '0.75rem', padding: '0.75rem 1rem' }}>
+      {isEditing ? (
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 80px auto', gap: '1rem', alignItems: 'end' }}>
+          <div className="input-group" style={{ margin: 0 }}>
+            <label style={{ fontSize: '0.7rem' }}>{worklog.issueKey} - Descripción</label>
+            <textarea
+              rows="2"
+              className="edit-description-input"
+              value={editValues.comment}
+              onChange={(e) => setEditValues({ ...editValues, comment: e.target.value })}
+              style={{ minWidth: '0', width: '100%' }}
+            />
+          </div>
+          <div className="input-group" style={{ margin: 0 }}>
+            <label style={{ fontSize: '0.7rem' }}>Horas</label>
+            <input
+              type="number"
+              step="0.5"
+              className="edit-hours-input"
+              value={editValues.hours}
+              onChange={(e) => setEditValues({ ...editValues, hours: e.target.value })}
+              style={{ minWidth: '0', width: '100%' }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: '0.4rem', paddingBottom: '2px', minWidth: '80px', justifyContent: 'flex-end' }}>
+            <button 
+              className="btn btn-primary" 
+              onClick={handleSave} 
+              disabled={loading} 
+              title="Guardar"
+              style={{ width: '38px', height: '38px', padding: 0, minWidth: '38px' }}
+            >
+              {loading ? <Loader2 size={18} className="spin" /> : <Check size={18} />}
+            </button>
+            <button 
+              className="btn btn-outline" 
+              onClick={() => setIsEditing(false)} 
+              disabled={loading} 
+              title="Cancelar"
+              style={{ width: '38px', height: '38px', padding: 0, minWidth: '38px' }}
+            >
+              <X size={18} />
+            </button>
+          </div>
+        </div>
+      ) : showDeleteConfirm ? (
+        <div className="fade-in" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#FDF2F2', padding: '0.5rem 1rem', borderRadius: '4px', border: '1px solid #FDE2E2' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', color: '#C81E1E', fontSize: '0.85rem', fontWeight: 600 }}>
+            <Trash2 size={18} />
+            <span>¿Confirmas que deseas eliminar este registro?</span>
+          </div>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <button 
+              className="btn btn-primary" 
+              onClick={handleDelete}
+              disabled={loading}
+              style={{ background: '#C81E1E', fontSize: '0.75rem', padding: '0.4rem 0.8rem' }}
+            >
+              ELIMINAR
+            </button>
+            <button 
+              className="btn btn-outline" 
+              onClick={() => setShowDeleteConfirm(false)}
+              disabled={loading}
+              style={{ fontSize: '0.75rem', padding: '0.4rem 0.8rem' }}
+            >
+              CANCELAR
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <div style={{ background: 'var(--latinia-bg)', padding: '0.4rem 0.6rem', borderRadius: '4px', minWidth: '85px', textAlign: 'center' }}>
+            <span style={{ fontWeight: 700, color: 'var(--latinia-teal)', fontSize: '0.85rem' }}>{worklog.issueKey}</span>
+          </div>
+          <div style={{ flex: 1, fontSize: '0.85rem', color: 'var(--text-primary)' }}>
+            {worklog.comment}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-secondary)', fontSize: '0.85rem', fontWeight: 600 }}>
+              <Clock size={14} /> {worklog.timeSpentSeconds / 3600}h
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button 
+                className="btn-icon" 
+                onClick={() => setIsEditing(true)} 
+                style={{ color: 'var(--latinia-teal)' }} 
+                title="Editar"
+              >
+                <Edit3 size={16} />
+              </button>
+              <button 
+                className="btn-icon" 
+                onClick={() => setShowDeleteConfirm(true)} 
+                style={{ 
+                  color: '#E74C3C', 
+                  width: '32px', 
+                  height: '32px', 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  justifyContent: 'center',
+                  borderRadius: '4px',
+                  transition: 'background 0.2s'
+                }} 
+                title="Eliminar"
+                onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(231, 76, 60, 0.1)'}
+                onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function App() {
-  const { instance, accounts } = useMsal() || { instance: null, accounts: [] }
-  const isAuthenticated = useIsAuthenticated()
 
   const [weekDays] = useState(() => getWeekDays())
   const [selectedDay, setSelectedDay] = useState(new Date())
@@ -140,9 +290,13 @@ function App() {
 
   const [config, setConfig] = useState(() => {
     const saved = localStorage.getItem('syncronic_config')
-    const baseConfig = { jiraEmail: '', jiraToken: '', emailRecipient: 'qa_global@latinia.com', emailCc: '', outlookClientId: '' }
+    const baseConfig = { jiraEmail: '', jiraToken: '' }
     return saved ? { ...baseConfig, ...JSON.parse(saved) } : baseConfig
   })
+
+  // Estado para el historial de la semana
+  const [weeklyHistory, setWeeklyHistory] = useState({})
+  const [fetchingHistory, setFetchingHistory] = useState(false)
 
   // Nuevos estados para recordatorios
   const [reminderSettings, setReminderSettings] = useState(() => {
@@ -176,6 +330,30 @@ function App() {
     loadHoursFromJira()
   }, [selectedDay, connectionStatus, config.jiraEmail, config.jiraToken])
 
+  // Cargar historial semanal cuando cambia la pestaña
+  useEffect(() => {
+    if (activeTab === 'history' && connectionStatus === 'success') {
+      loadWeeklyHistory()
+    }
+  }, [activeTab, connectionStatus])
+
+  const loadWeeklyHistory = async () => {
+    setFetchingHistory(true)
+    const history = {}
+    try {
+      for (const day of weekDays) {
+        const dateStr = day.toISOString().split('T')[0]
+        const worklogs = await fetchDetailedWorklogs(config.jiraEmail, config.jiraToken, day)
+        history[dateStr] = worklogs
+      }
+      setWeeklyHistory(history)
+    } catch (error) {
+      console.error("Error cargando historial semanal:", error)
+    } finally {
+      setFetchingHistory(false)
+    }
+  }
+
   useEffect(() => {
     localStorage.setItem('syncronic_config', JSON.stringify(config))
   }, [config])
@@ -198,15 +376,18 @@ function App() {
     const checkInterval = setInterval(() => {
       const now = new Date()
       const [shiftH, shiftM] = reminderSettings.shiftEndTime.split(':').map(Number)
-
-      // 1. Notificación de fin de jornada (10 min antes)
       const shiftEnd = new Date()
       shiftEnd.setHours(shiftH, shiftM, 0, 0)
+
+      // 1. Notificación de fin de jornada (10 min antes)
       const tenMinsBefore = new Date(shiftEnd.getTime() - 10 * 60000)
 
-      // Debugging: console.log(`Chequeo Recordatorios: ${now.toLocaleTimeString()} - Fin: ${shiftEnd.toLocaleTimeString()}`)
+      // Log de depuración cada segundo para asegurar que el sistema está vivo
+      if (now.getSeconds() === 0) {
+        console.log(`[Syncronic] Verificando: ${now.toLocaleTimeString()} | Fin: ${reminderSettings.shiftEndTime} | Intervalo: ${reminderSettings.interval}m | Horas: ${totalDayHours}h`)
+      }
 
-      // Si estamos en el minuto exacto de los 10 min antes (solo al segundo 0)
+      // 1. Notificación de fin de jornada (10 min antes)
       if (now.getHours() === tenMinsBefore.getHours() && 
           now.getMinutes() === tenMinsBefore.getMinutes() && 
           now.getSeconds() < 1) {
@@ -225,8 +406,13 @@ function App() {
       const minutesPastMidnight = now.getHours() * 60 + now.getMinutes()
       if (minutesPastMidnight % reminderSettings.interval === 0 && now.getSeconds() < 1) {
         const diffToFinish = (shiftEnd.getTime() - now.getTime()) / 60000
-        // Solo avisar si falta más de 15 min para salir Y si no ha llegado a las 8 horas
-        if (diffToFinish > 15 && totalDayHours < 8) {
+        
+        // Verificación de condiciones para el trigger periódico
+        if (diffToFinish <= 15) {
+          console.log(`[Syncronic] Trigger periódico omitido: Muy cerca del fin de jornada (${Math.round(diffToFinish)} min restantes).`)
+        } else if (totalDayHours >= 8) {
+          console.log(`[Syncronic] Trigger periódico omitido: Ya tienes ${totalDayHours}h imputadas.`)
+        } else {
           if (Notification.permission === 'granted') {
             console.log("Trigger: Notificación periódica.")
             new Notification("Recordatorio Syncronic", {
@@ -272,15 +458,6 @@ function App() {
     } catch (error) {
       setConnectionStatus('error')
     }
-  }
-
-  const handleLogin = () => {
-    if (!config.outlookClientId) {
-      alert("Configura tu Client ID en el panel de configuración.")
-      setActiveTab('config')
-      return
-    }
-    instance.loginPopup(loginRequest).catch(console.error)
   }
 
   const handleJiraSync = async () => {
@@ -332,7 +509,7 @@ function App() {
     }
   }
 
-  const handleSendEmail = async (method) => {
+  const handleSendEmail = async () => {
     // Enviar el contenido ACTUAL del editor (que es lo acumulado)
     const baseEmpty = formatReportEmail(selectedDay, [])
     if (editableBody.trim() === baseEmpty.trim() || editableBody.length < 30) {
@@ -346,55 +523,27 @@ function App() {
       
       // Calcular fecha del "Plan" (Mañana, o Lunes si es viernes/fin de semana)
       const planDay = new Date(selectedDay)
-      const dayOfWeek = planDay.getDay() // 0=Dom, 5=Vie, 6=Sab
+      const dayOfWeek = planDay.getDay() 
       
-      if (dayOfWeek === 5) { // Viernes -> Sumar 3 días para Lunes
-        planDay.setDate(planDay.getDate() + 3)
-      } else if (dayOfWeek === 6) { // Sábado -> Sumar 2 días para Lunes
-        planDay.setDate(planDay.getDate() + 2)
-      } else { // Otros días -> Sumar 1 día
-        planDay.setDate(planDay.getDate() + 1)
-      }
+      if (dayOfWeek === 5) { planDay.setDate(planDay.getDate() + 3) }
+      else if (dayOfWeek === 6) { planDay.setDate(planDay.getDate() + 2) }
+      else { planDay.setDate(planDay.getDate() + 1) }
+      
       const planStr = planDay.toLocaleDateString()
-
       const subject = `Reporte ${todayStr} - Plan ${planStr}`
-      if (method === 'outlook' && isAuthenticated) {
-        const tokenResp = await instance.acquireTokenSilent({ ...loginRequest, account: accounts[0] })
-        await sendOutlookEmail(tokenResp.accessToken, config.emailRecipient, subject, editableBody)
-        alert("¡Éxito! Correo enviado vía Outlook.")
-        // Limpiar el editor SOLO si el envío por Outlook fue exitoso
-        const baseBody = formatReportEmail(selectedDay, [])
-        setEditableBody(baseBody)
-      } else {
-        // Para mailto, preparamos la URL primero para dispararla inmediatamente
-        const subjectEnc = encodeURIComponent(subject)
-        const ccEnc = encodeURIComponent(config.emailCc || '')
-        const bodyEnc = encodeURIComponent(editableBody)
-        
-        let mailtoUrl = `mailto:${config.emailRecipient}?cc=${ccEnc}&subject=${subjectEnc}&body=${bodyEnc}`
-        
-        if (mailtoUrl.length > 2000) {
-          console.warn("Mailto URL too long, falling back to clipboard-only body.")
-          const shortBody = encodeURIComponent("El reporte ha sido copiado al portapapeles. Pégalo aquí (Ctrl+V).")
-          mailtoUrl = `mailto:${config.emailRecipient}?cc=${ccEnc}&subject=${subjectEnc}&body=${shortBody}`
-        }
-
-        // Ejecutar mailto de forma síncrona al click para evitar bloqueos del navegador
-        window.location.href = mailtoUrl
-
-        // Intentar copiar al portapapeles en segundo plano
-        navigator.clipboard.writeText(editableBody)
-          .then(() => {
-            console.log("Reporte copiado al portapapeles exitosamente.")
-            alert("Se ha copiado el reporte al portapapeles y se ha solicitado abrir tu correo.")
-          })
-          .catch(err => {
-            console.error('Error al copiar al portapapeles:', err)
-          })
-      }
-    } catch (error) {
-      console.error(error)
-      alert("Error al procesar el envío. Revisa la consola.")
+      
+      const subjectEnc = encodeURIComponent(subject)
+      const bodyEnc = encodeURIComponent(editableBody)
+      
+      // Usar destinatario fijo ya que se eliminó de la config
+      const mailtoUrl = `mailto:qa_global@latinia.com?subject=${subjectEnc}&body=${bodyEnc}`
+      
+      window.location.href = mailtoUrl
+      navigator.clipboard.writeText(editableBody)
+      alert("Se ha copiado el reporte al portapapeles y se ha solicitado abrir tu correo.")
+    } catch (e) {
+      console.error(e)
+      alert("Error al preparar correo")
     } finally {
       setLoading(false)
     }
@@ -405,7 +554,7 @@ function App() {
       {/* HEADER */}
       <header className="top-header">
         <div className="latinia-logo" style={{ display: 'flex', alignItems: 'center', height: '100%', paddingLeft: '1.5rem' }}>
-          <img src="/logo.png" alt="Syncronic" style={{ height: '60px', width: 'auto', pointerEvents: 'none' }} />
+          <img src="/logo.png" alt="Latinia" style={{ height: '60px', width: 'auto', pointerEvents: 'none' }} />
         </div>
         <div style={{ flex: 1, paddingLeft: '1.5rem', fontSize: '1.8rem', fontWeight: 800, letterSpacing: '-0.5px', color: 'white', display: 'flex', alignItems: 'center' }}>
           Syncronic
@@ -417,21 +566,16 @@ function App() {
         <a href="#" className={`sidebar-item ${activeTab === 'report' ? 'active' : ''}`} onClick={() => setActiveTab('report')}>
           <LayoutPanelLeft size={18} /> Panel global
         </a>
+        <a href="#" className={`sidebar-item ${activeTab === 'history' ? 'active' : ''}`} onClick={() => setActiveTab('history')}>
+          <History size={18} /> Historial Semanal
+        </a>
         <a href="#" className={`sidebar-item ${activeTab === 'config' ? 'active' : ''}`} onClick={() => setActiveTab('config')}>
           <Settings size={18} /> Configuración
         </a>
         <div style={{ marginTop: 'auto', padding: '1rem 1.5rem', borderTop: '1px solid var(--latinia-border)' }}>
-          {isAuthenticated ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem' }}>
-              <div style={{ width: 8, height: 8, background: '#10b981', borderRadius: '50%' }}></div>
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{accounts?.[0]?.username}</span>
-              <button onClick={() => instance.logoutPopup()} className="btn-icon" style={{ marginLeft: 'auto' }}><LogOut size={14} /></button>
-            </div>
-          ) : (
-            <button className="btn btn-outline" style={{ width: '100%', fontSize: '0.75rem' }} onClick={handleLogin}>
-              <LogIn size={14} /> CONECTAR OUTLOOK
-            </button>
-          )}
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+            Syncronic v1.0
+          </div>
         </div>
       </aside>
 
@@ -467,15 +611,6 @@ function App() {
                       <div>
                         <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-secondary)' }}>ESTADO JIRA:</div>
                         <div style={{ fontSize: '0.85rem', color: connectionStatus === 'success' ? '#10b981' : '#f59e0b', fontWeight: 600 }}>{connectionStatus === 'success' ? 'CONECTADO' : 'PENDIENTE'}</div>
-                      </div>
-                    </div>
-                  </div>
-                  <div style={{ background: 'white', padding: '1.2rem' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                      {isAuthenticated ? <CircleCheck size={20} color="#10b981" /> : <CircleAlert size={20} color="#f59e0b" />}
-                      <div>
-                        <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-secondary)' }}>ESTADO OUTLOOK:</div>
-                        <div style={{ fontSize: '0.85rem', color: isAuthenticated ? '#10b981' : '#f59e0b', fontWeight: 600 }}>{isAuthenticated ? 'CONECTADO' : 'PENDIENTE'}</div>
                       </div>
                     </div>
                   </div>
@@ -530,11 +665,84 @@ function App() {
                       }}>
                         <Clipboard size={16} /> COPIAR
                       </button>
-                      <button className="btn btn-outline" style={{ flex: 1 }} onClick={() => handleSendEmail('mailto')}><Mail size={16} /> MAILTO</button>
-                      <button className="btn btn-primary" style={{ flex: 1.5 }} onClick={() => handleSendEmail('outlook')} disabled={!isAuthenticated}><Send size={16} /> ENVIAR OUTLOOK</button>
+                      <button className="btn btn-primary" style={{ flex: 1.5 }} onClick={handleSendEmail}><Mail size={16} /> ENVIAR REPORTE (MAILTO)</button>
                     </div>
                   </div>
                 </div>
+              </div>
+            </div>
+          ) : activeTab === 'history' ? (
+            <div className="fade-in">
+              <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: '1.5rem' }}>
+                <div className="card-title"><History size={20} color="var(--latinia-teal)" /> HISTORIAL DE LA SEMANA</div>
+                {fetchingHistory && <Loader2 size={20} className="spin" color="var(--latinia-teal)" />}
+              </div>
+              
+              <div style={{ display: 'grid', gap: '2rem' }}>
+                {weekDays.map(day => {
+                  const dateStr = day.toISOString().split('T')[0]
+                  const logs = weeklyHistory[dateStr] || []
+                  const dayTotal = logs.reduce((sum, l) => sum + (l.timeSpentSeconds / 3600), 0)
+                  
+                  return (
+                    <div key={dateStr} className="config-section" style={{ border: 'none', background: '#f8fafc', padding: '1.5rem', borderRadius: '8px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                          <div style={{ background: 'var(--latinia-teal)', color: 'white', padding: '0.5rem 1rem', borderRadius: '4px', fontWeight: 800 }}>
+                            {day.toLocaleDateString('es-ES', { weekday: 'long' }).toUpperCase()} {day.getDate()}
+                          </div>
+                          <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                            {day.toLocaleDateString()}
+                          </span>
+                        </div>
+                        <div style={{ color: 'var(--latinia-teal)', fontWeight: 800, fontSize: '1rem' }}>
+                          {dayTotal}h imputadas
+                        </div>
+                      </div>
+                      
+                      {logs.length > 0 ? (
+                        <div>
+                          {logs.map(log => (
+                            <HistoryEntry 
+                              key={log.id} 
+                              worklog={log} 
+                              config={config}
+                              onUpdate={async (key, id, comment, sec) => {
+                                await updateJiraWorklog(config.jiraEmail, config.jiraToken, key, id, comment, sec)
+                                loadWeeklyHistory()
+                                // Si editamos el día seleccionado hoy, actualizar el contador global
+                                if (day.toDateString() === selectedDay.toDateString()) {
+                                  const hours = await fetchJiraWorklogs(config.jiraEmail, config.jiraToken, selectedDay)
+                                  setTotalDayHours(hours)
+                                }
+                              }}
+                              onDelete={async (key, id) => {
+                                try {
+                                  setFetchingHistory(true)
+                                  await deleteJiraWorklog(config.jiraEmail, config.jiraToken, key, id)
+                                  await loadWeeklyHistory()
+                                  if (day.toDateString() === selectedDay.toDateString()) {
+                                    const hours = await fetchJiraWorklogs(config.jiraEmail, config.jiraToken, selectedDay)
+                                    setTotalDayHours(hours)
+                                  }
+                                } catch (e) {
+                                  console.error(e)
+                                  alert("Error al eliminar el registro. Revisa la consola.")
+                                } finally {
+                                  setFetchingHistory(false)
+                                }
+                              }}
+                            />
+                          ))}
+                        </div>
+                      ) : (
+                        <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-secondary)', fontSize: '0.9rem', background: 'white', borderRadius: '4px', border: '1px dashed var(--latinia-border)' }}>
+                          No hay horas registradas para este día.
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             </div>
           ) : (
@@ -564,19 +772,10 @@ function App() {
                     </div>
                   </div>
                   <div className="config-section" style={{ padding: '1rem', border: '1px solid var(--latinia-border)', borderRadius: '4px' }}>
-                    <h5 style={{ color: 'var(--latinia-teal)', marginBottom: '1rem' }}>OUTLOOK</h5>
-                    <div className="input-group">
-                      <label>Azure Client ID</label>
-                      <input type="text" name="outlookClientId" value={config.outlookClientId} onChange={handleConfigChange} />
-                    </div>
-                    <div className="input-group">
-                      <label>Destinatario (Para)</label>
-                      <input type="text" name="emailRecipient" value={config.emailRecipient} onChange={handleConfigChange} placeholder="ejemplo@empresa.com" />
-                    </div>
-                    <div className="input-group">
-                      <label>CC (Separados por coma)</label>
-                      <input type="text" name="emailCc" value={config.emailCc || ''} onChange={handleConfigChange} placeholder="equipo@empresa.com, jefe2@empresa.com" />
-                    </div>
+                    <h5 style={{ color: 'var(--latinia-teal)', marginBottom: '1rem' }}>SISTEMA</h5>
+                    <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                      Las notificaciones y los reportes locales están activos.
+                    </p>
                   </div>
                 </div>
               </div>

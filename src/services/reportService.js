@@ -149,6 +149,101 @@ export const fetchJiraWorklogs = async (email, apiToken, date) => {
 };
 
 /**
+ * Obtiene los worklogs detallados del usuario en una fecha específica
+ */
+export const fetchDetailedWorklogs = async (email, apiToken, date) => {
+  try {
+    const myself = await validateJiraConnection(email, apiToken);
+    const accountId = myself.accountId;
+
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const dateStr = `${year}-${month}-${day}`;
+
+    const jql = `worklogDate = "${dateStr}" AND worklogAuthor = "${accountId}"`;
+    const searchResponse = await axios.post(
+      `${JIRA_API_URL}/rest/api/3/search/jql`,
+      { jql, fields: ["key", "summary"], maxResults: 100 },
+      { headers: getJiraHeaders(email, apiToken) }
+    );
+
+    const issues = searchResponse.data.issues || [];
+    const detailedWorklogs = [];
+
+    for (const issue of issues) {
+      const worklogResponse = await axios.get(
+        `${JIRA_API_URL}/rest/api/3/issue/${issue.key}/worklog`,
+        { headers: getJiraHeaders(email, apiToken) }
+      );
+
+      const worklogs = worklogResponse.data.worklogs || [];
+      worklogs.forEach(wl => {
+        const wlDate = wl.started.split('T')[0];
+        if (wlDate === dateStr && (wl.author.accountId === accountId || wl.author.emailAddress === email)) {
+          detailedWorklogs.push({
+            id: wl.id,
+            issueKey: issue.key,
+            issueSummary: issue.fields.summary,
+            comment: wl.comment?.content?.[0]?.content?.[0]?.text || '',
+            timeSpentSeconds: wl.timeSpentSeconds,
+            started: wl.started
+          });
+        }
+      });
+    }
+
+    return detailedWorklogs;
+  } catch (error) {
+    console.error("Error fetching detailed worklogs:", error);
+    throw error;
+  }
+};
+
+/**
+ * Actualiza un worklog existente en Jira
+ */
+export const updateJiraWorklog = async (email, apiToken, issueKey, worklogId, comment, timeSpentSeconds) => {
+  try {
+    const response = await axios.put(
+      `${JIRA_API_URL}/rest/api/3/issue/${issueKey}/worklog/${worklogId}`,
+      {
+        comment: {
+          type: "doc",
+          version: 1,
+          content: [{
+            type: "paragraph",
+            content: [{ type: "text", text: comment }]
+          }]
+        },
+        timeSpentSeconds: timeSpentSeconds
+      },
+      { headers: getJiraHeaders(email, apiToken) }
+    );
+    return response.data;
+  } catch (error) {
+    console.error("Error updating Jira worklog:", error);
+    throw error;
+  }
+};
+
+/**
+ * Elimina un worklog de Jira
+ */
+export const deleteJiraWorklog = async (email, apiToken, issueKey, worklogId) => {
+  try {
+    await axios.delete(
+      `${JIRA_API_URL}/rest/api/3/issue/${issueKey}/worklog/${worklogId}`,
+      { headers: getJiraHeaders(email, apiToken) }
+    );
+    return true;
+  } catch (error) {
+    console.error("Error deleting Jira worklog:", error);
+    throw error;
+  }
+};
+
+/**
  * Busca issues en Jira para el autocompletado
  */
 export const searchJiraIssues = async (email, apiToken, query) => {
