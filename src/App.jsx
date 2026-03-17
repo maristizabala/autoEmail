@@ -459,18 +459,21 @@ function App() {
     // 1. Validar Jira
     setJiraConnection('checking')
     try {
-      await validateJiraConnection(config.jiraEmail, config.jiraToken)
+      const myself = await validateJiraConnection(config.jiraEmail, config.jiraToken)
       setJiraConnection('success')
+      const accountId = myself.accountId
       
       // 2. Validar Tempo solo si Jira fue exitoso y hay un token
       if (config.tempoToken) {
         setTempoConnection('checking')
         try {
-          await axios.get(`${TEMPO_API_URL}/4/worklogs/user`, { 
+          // Usamos el accountId obtenido de Jira para validar Tempo adecuadamente
+          await axios.get(`${TEMPO_API_URL}/4/worklogs/user/${accountId}?limit=1`, { 
             headers: getTempoHeaders(config.tempoToken) 
           });
           setTempoConnection('success')
         } catch (e) {
+          console.error("Tempo Validation Error:", e.response?.data || e.message);
           setTempoConnection('error')
         }
       }
