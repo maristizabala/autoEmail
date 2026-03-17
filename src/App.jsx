@@ -1,9 +1,13 @@
 import { useState, useEffect, useRef } from 'react'
+import axios from 'axios'
 import {
   CircleCheck, Mail, Clipboard, Terminal, Search, Loader2, Plus, Trash2,
   CircleX, Clock, CircleAlert, LogIn, LogOut, Home, User, Briefcase, Bell,
   LayoutPanelLeft, ChevronRight, EllipsisVertical, Calendar, Send, Settings, History, Edit3, Check, Save, X
 } from 'lucide-react'
+
+const JIRA_API_URL = '/jira-api';
+const TEMPO_API_URL = '/tempo-api';
 import {
   validateJiraConnection,
   logJiraWorklog,
@@ -15,7 +19,8 @@ import {
   updateJiraWorklog,
   deleteJiraWorklog,
   searchJiraIssues,
-  formatDateLocal
+  formatDateLocal,
+  getTempoHeaders
 } from './services/reportService';
 
 function ActivityRow({ index, activity, updateActivity, removeActivity, config }) {
@@ -311,10 +316,24 @@ function App() {
   const [showJiraSuccess, setShowJiraSuccess] = useState(false)
 
   useEffect(() => {
-    // Inicializar el cuerpo con el template base cuando cambia el día
-    const baseBody = formatReportEmail(selectedDay, [])
-    setEditableBody(baseBody)
-    setActivities([{ issueKey: '', report: '', hours: '1' }])
+    // Intentar cargar borrador guardado para este día
+    const dateStr = formatDateLocal(selectedDay)
+    const savedDraft = localStorage.getItem(`syncronic_draft_${dateStr}`)
+    
+    if (savedDraft) {
+      try {
+        const { body, activities: savedActivities } = JSON.parse(savedDraft)
+        setEditableBody(body)
+        setActivities(savedActivities)
+      } catch (e) {
+        console.error("Error al cargar el borrador guardado:", e)
+      }
+    } else {
+      // Si no hay borrador, inicializar con el template base
+      const baseBody = formatReportEmail(selectedDay, [])
+      setEditableBody(baseBody)
+      setActivities([{ issueKey: '', report: '', hours: '1' }])
+    }
 
     // Cargar horas automáticamente desde Jira si tenemos conexión
     const loadHoursFromJira = async () => {
@@ -330,7 +349,27 @@ function App() {
       }
     }
     loadHoursFromJira()
-  }, [selectedDay, jiraConnection, config.jiraEmail, config.jiraToken])
+  }, [selectedDay]) // Solo cuando cambia el día seleccionado
+
+  // Efecto separado para guardar borradores en tiempo real
+  useEffect(() => {
+    const dateStr = formatDateLocal(selectedDay)
+    const draft = {
+      body: editableBody,
+      activities: activities
+    }
+    // Solo guardar si hay algo relevante para evitar llenar el storage con vacíos
+    if (editableBody || (activities.length > 0 && activities[0].issueKey)) {
+      localStorage.setItem(`syncronic_draft_${dateStr}`, JSON.stringify(draft))
+    }
+  }, [editableBody, activities, selectedDay])
+
+  // Auto-validación al iniciar la aplicación
+  useEffect(() => {
+    if (config.jiraEmail && config.jiraToken) {
+      testConnection()
+    }
+  }, [])
 
   // Cargar historial semanal cuando cambia la pestaña
   useEffect(() => {
@@ -519,8 +558,8 @@ function App() {
       setActivities([{ issueKey: '', report: '', hours: '1' }])
 
       // Actualizar el contador de horas del día llamando a Jira de nuevo para asegurar precisión
-      const hours = await fetchJiraWorklogs(config.jiraEmail, config.jiraToken, selectedDay)
-      setTotalDayHours(hours)
+      const { totalHours } = await fetchJiraWorklogs(config.jiraEmail, config.jiraToken, selectedDay)
+      setTotalDayHours(totalHours)
 
       alert("¡Éxito! Horas imputadas en Jira y añadidas al reporte.")
     } catch (error) {
@@ -730,12 +769,12 @@ function App() {
                               worklog={log} 
                               config={config}
                               onUpdate={async (key, id, comment, sec) => {
-                                await updateJiraWorklog(config.jiraEmail, config.jiraToken, key, id, comment, sec)
+                                await updateJiraWorklog(config.jiraEmail, config.jiraToken, key, id, comment, sec, log.started, log.authorAccountId)
                                 loadWeeklyHistory()
                                 // Si editamos el día seleccionado hoy, actualizar el contador global
                                 if (day.toDateString() === selectedDay.toDateString()) {
-                                  const hours = await fetchJiraWorklogs(config.jiraEmail, config.jiraToken, selectedDay)
-                                  setTotalDayHours(hours)
+                                  const { totalHours } = await fetchJiraWorklogs(config.jiraEmail, config.jiraToken, selectedDay)
+                                  setTotalDayHours(totalHours)
                                 }
                               }}
                               onDelete={async (key, id) => {
@@ -744,8 +783,8 @@ function App() {
                                   await deleteJiraWorklog(config.jiraEmail, config.jiraToken, key, id)
                                   await loadWeeklyHistory()
                                   if (day.toDateString() === selectedDay.toDateString()) {
-                                    const hours = await fetchJiraWorklogs(config.jiraEmail, config.jiraToken, selectedDay)
-                                    setTotalDayHours(hours)
+                                    const { totalHours } = await fetchJiraWorklogs(config.jiraEmail, config.jiraToken, selectedDay)
+                                    setTotalDayHours(totalHours)
                                   }
                                 } catch (e) {
                                   console.error(e)
@@ -842,9 +881,14 @@ function App() {
 
                   <div className="config-section" style={{ padding: '1rem', border: '1px solid var(--latinia-border)', borderRadius: '4px' }}>
                     <h5 style={{ color: 'var(--latinia-teal)', marginBottom: '1rem' }}>SISTEMA</h5>
-                    <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                      Las notificaciones y los reportes locales están activos.
-                    </p>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#10b981', fontSize: '0.85rem', fontWeight: 600 }}>
+                        <CircleCheck size={16} /> Persistencia de borradores activa
+                      </div>
+                      <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                        Tus cambios se guardan automáticamente por día en el navegador. La conexión se restaura al iniciar.
+                      </p>
+                    </div>
                   </div>
                 </div>
               </div>

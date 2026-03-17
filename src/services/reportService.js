@@ -22,7 +22,7 @@ const getJiraHeaders = (email, apiToken) => {
 /**
  * Función auxiliar para obtener las cabeceras de Tempo (Bearer Auth)
  */
-const getTempoHeaders = (token) => {
+export const getTempoHeaders = (token) => {
   return {
     'Authorization': `Bearer ${token}`,
     'Accept': 'application/json',
@@ -378,7 +378,8 @@ export const fetchDetailedWorklogs = async (email, apiToken, date) => {
             issueSummary: wl.description || 'Sincronizado vía Tempo',
             comment: wl.description || '',
             timeSpentSeconds: wl.timeSpentSeconds,
-            started: `${wl.startDate}T${wl.startTime}`
+            started: `${wl.startDate}T${wl.startTime}`,
+            authorAccountId: accountId
           };
         }));
         return detailed;
@@ -504,7 +505,8 @@ export const fetchDetailedWorklogs = async (email, apiToken, date) => {
             issueSummary: summary,
             comment: wl.comment?.content?.[0]?.content?.[0]?.text || '',
             timeSpentSeconds: wl.timeSpentSeconds,
-            started: wl.started
+            started: wl.started,
+            authorAccountId: wl.author?.accountId
           });
         }
       });
@@ -520,7 +522,7 @@ export const fetchDetailedWorklogs = async (email, apiToken, date) => {
 /**
  * Actualiza un worklog existente en Jira o Tempo según sea necesario
  */
-export const updateJiraWorklog = async (email, apiToken, issueKey, worklogId, comment, timeSpentSeconds) => {
+export const updateJiraWorklog = async (email, apiToken, issueKey, worklogId, comment, timeSpentSeconds, startDate, authorAccountId) => {
   const savedConfig = localStorage.getItem('syncronic_config');
   const tempoConfig = savedConfig ? JSON.parse(savedConfig) : null;
   const tempoToken = tempoConfig?.tempoToken;
@@ -544,22 +546,33 @@ export const updateJiraWorklog = async (email, apiToken, issueKey, worklogId, co
     );
     return response.data;
   } catch (error) {
-    // Si falla con 404 y tenemos token de Tempo, intentamos vía Tempo
+    // Si falla con 404 (indicativo de que es un worklog de Tempo) y tenemos token de Tempo
     if (error.response?.status === 404 && tempoToken) {
       console.log(`[Syncronic] 404 en Jira al actualizar ${worklogId}, reintentando vía API de Tempo...`);
+      
+      // Para Tempo PUT necesitamos: authorAccountId, description, startDate, timeSpentSeconds
+      if (!authorAccountId || !startDate) {
+        console.warn("[Syncronic] Faltan datos (authorAccountId o startDate) para reintento en Tempo.");
+        throw error; // Re-lanzar el error original de Jira si no tenemos datos para Tempo
+      }
+
       try {
-        // En Tempo API v4, el body es distinto
+        // Asegurar formato de fecha YYYY-MM-DD para Tempo
+        const formattedDate = typeof startDate === 'string' ? startDate.split('T')[0] : formatDateLocal(startDate);
+
         const response = await axios.put(
           `${TEMPO_API_URL}/4/worklogs/${worklogId}`,
           {
+            authorAccountId: authorAccountId,
             description: comment,
+            startDate: formattedDate,
             timeSpentSeconds: timeSpentSeconds
           },
           { headers: getTempoHeaders(tempoToken) }
         );
         return response.data;
       } catch (tempoError) {
-        console.error("Error updating via Tempo API:", tempoError.message);
+        console.error("Error updating via Tempo API:", tempoError.response?.data || tempoError.message);
         throw tempoError;
       }
     }
