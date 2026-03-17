@@ -14,7 +14,8 @@ import {
   fetchDetailedWorklogs,
   updateJiraWorklog,
   deleteJiraWorklog,
-  searchJiraIssues
+  searchJiraIssues,
+  formatDateLocal
 } from './services/reportService';
 
 function ActivityRow({ index, activity, updateActivity, removeActivity, config }) {
@@ -285,12 +286,13 @@ function App() {
   const [editableBody, setEditableBody] = useState('')
   const [loading, setLoading] = useState(false)
   const [activeTab, setActiveTab] = useState('report')
-  const [connectionStatus, setConnectionStatus] = useState('idle')
+  const [jiraConnection, setJiraConnection] = useState('idle')
+  const [tempoConnection, setTempoConnection] = useState('idle')
   const [totalDayHours, setTotalDayHours] = useState(0)
 
   const [config, setConfig] = useState(() => {
     const saved = localStorage.getItem('syncronic_config')
-    const baseConfig = { jiraEmail: '', jiraToken: '' }
+    const baseConfig = { jiraEmail: '', jiraToken: '', tempoToken: '' }
     return saved ? { ...baseConfig, ...JSON.parse(saved) } : baseConfig
   })
 
@@ -316,10 +318,10 @@ function App() {
 
     // Cargar horas automáticamente desde Jira si tenemos conexión
     const loadHoursFromJira = async () => {
-      if (config.jiraEmail && config.jiraToken && connectionStatus === 'success') {
+      if (config.jiraEmail && config.jiraToken && jiraConnection === 'success') {
         try {
-          const hours = await fetchJiraWorklogs(config.jiraEmail, config.jiraToken, selectedDay)
-          setTotalDayHours(hours)
+          const { totalHours } = await fetchJiraWorklogs(config.jiraEmail, config.jiraToken, selectedDay)
+          setTotalDayHours(totalHours)
         } catch (error) {
           console.error("No se pudieron cargar las horas de Jira:", error)
         }
@@ -328,21 +330,21 @@ function App() {
       }
     }
     loadHoursFromJira()
-  }, [selectedDay, connectionStatus, config.jiraEmail, config.jiraToken])
+  }, [selectedDay, jiraConnection, config.jiraEmail, config.jiraToken])
 
   // Cargar historial semanal cuando cambia la pestaña
   useEffect(() => {
-    if (activeTab === 'history' && connectionStatus === 'success') {
+    if (activeTab === 'history' && jiraConnection === 'success') {
       loadWeeklyHistory()
     }
-  }, [activeTab, connectionStatus])
+  }, [activeTab, jiraConnection])
 
   const loadWeeklyHistory = async () => {
     setFetchingHistory(true)
     const history = {}
     try {
       for (const day of weekDays) {
-        const dateStr = day.toISOString().split('T')[0]
+        const dateStr = formatDateLocal(day)
         const worklogs = await fetchDetailedWorklogs(config.jiraEmail, config.jiraToken, day)
         history[dateStr] = worklogs
       }
@@ -442,7 +444,9 @@ function App() {
   const handleConfigChange = (e) => {
     setConfig({ ...config, [e.target.name]: e.target.value })
     if (e.target.name === 'jiraEmail' || e.target.name === 'jiraToken') {
-      setConnectionStatus('idle')
+      setJiraConnection('idle')
+    } else if (e.target.name === 'tempoToken') {
+      setTempoConnection('idle')
     }
   }
 
@@ -451,12 +455,27 @@ function App() {
       alert("Configura tus credenciales de Jira primero.")
       return
     }
-    setConnectionStatus('checking')
+    
+    // 1. Validar Jira
+    setJiraConnection('checking')
     try {
       await validateJiraConnection(config.jiraEmail, config.jiraToken)
-      setConnectionStatus('success')
+      setJiraConnection('success')
+      
+      // 2. Validar Tempo solo si Jira fue exitoso y hay un token
+      if (config.tempoToken) {
+        setTempoConnection('checking')
+        try {
+          await axios.get(`${TEMPO_API_URL}/4/worklogs/user`, { 
+            headers: getTempoHeaders(config.tempoToken) 
+          });
+          setTempoConnection('success')
+        } catch (e) {
+          setTempoConnection('error')
+        }
+      }
     } catch (error) {
-      setConnectionStatus('error')
+      setJiraConnection('error')
     }
   }
 
@@ -468,7 +487,7 @@ function App() {
     }
     setLoading(true)
     try {
-      if (connectionStatus === 'success') {
+      if (jiraConnection === 'success') {
         for (const activity of validActivities) {
           const seconds = Math.round((parseFloat(activity.hours) || 1) * 3600)
           await logJiraWorklog(config.jiraEmail, config.jiraToken, activity.issueKey, activity.report, selectedDay, seconds)
@@ -605,12 +624,12 @@ function App() {
             <div className="fade-in">
               <div className="card">
                 <div className="status-grid">
-                  <div style={{ background: 'white', padding: '1.2rem' }}>
+                    <div style={{ background: 'white', padding: '1.2rem' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                      {connectionStatus === 'success' ? <CircleCheck size={20} color="#10b981" /> : <CircleAlert size={20} color="#f59e0b" />}
+                      {jiraConnection === 'success' ? <CircleCheck size={20} color="#10b981" /> : <CircleAlert size={20} color="#f59e0b" />}
                       <div>
                         <div style={{ fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-secondary)' }}>ESTADO JIRA:</div>
-                        <div style={{ fontSize: '0.85rem', color: connectionStatus === 'success' ? '#10b981' : '#f59e0b', fontWeight: 600 }}>{connectionStatus === 'success' ? 'CONECTADO' : 'PENDIENTE'}</div>
+                        <div style={{ fontSize: '0.85rem', color: jiraConnection === 'success' ? '#10b981' : '#f59e0b', fontWeight: 600 }}>{jiraConnection === 'success' ? 'CONECTADO' : 'PENDIENTE'}</div>
                       </div>
                     </div>
                   </div>
@@ -761,16 +780,63 @@ function App() {
                       <input type="password" name="jiraToken" value={config.jiraToken} onChange={handleConfigChange} />
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                      <button className="btn btn-outline" onClick={testConnection} disabled={connectionStatus === 'checking'}>
-                        {connectionStatus === 'checking' ? <Loader2 size={16} className="spin" /> : 'VALIDAR'}
+                      <button className="btn btn-outline" onClick={testConnection} disabled={jiraConnection === 'checking' || tempoConnection === 'checking'}>
+                        {jiraConnection === 'checking' || tempoConnection === 'checking' ? <Loader2 size={16} className="spin" /> : 'VALIDAR'}
                       </button>
-                      {connectionStatus === 'success' && (
+                      {jiraConnection === 'success' && (
                         <div className="fade-in" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#10b981', fontSize: '0.85rem', fontWeight: 600 }}>
-                          <CircleCheck size={16} /> Conexión exitosa
+                          <CircleCheck size={16} /> Jira conectado
+                        </div>
+                      )}
+                      {jiraConnection === 'error' && (
+                        <div className="fade-in" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#ef4444', fontSize: '0.85rem', fontWeight: 600 }}>
+                          <CircleAlert size={16} /> Error en Jira
                         </div>
                       )}
                     </div>
                   </div>
+
+                  <div className="config-section" style={{ 
+                    padding: '1rem', 
+                    border: '1px solid var(--latinia-border)', 
+                    borderRadius: '4px',
+                    opacity: jiraConnection === 'success' ? 1 : 0.6,
+                    background: jiraConnection === 'success' ? 'transparent' : '#f9fafb'
+                  }}>
+                    <h5 style={{ color: 'var(--latinia-teal)', marginBottom: '1rem' }}>TEMPO CLOUD (RECOMENDADO)</h5>
+                    {!config.tempoToken && jiraConnection !== 'success' && (
+                      <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.5rem', fontStyle: 'italic' }}>
+                        * Valida primero la conexión a Jira para habilitar Tempo.
+                      </p>
+                    )}
+                    <div className="input-group">
+                      <label>Tempo API Token</label>
+                      <input 
+                        type="password" 
+                        name="tempoToken" 
+                        placeholder="Bearer token de Tempo"
+                        value={config.tempoToken || ''} 
+                        onChange={handleConfigChange} 
+                        disabled={jiraConnection !== 'success'}
+                      />
+                      <div style={{ marginTop: '0.5rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                        <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                          Recomendado para una sincronización perfecta de horas.
+                        </p>
+                        {tempoConnection === 'success' && (
+                          <div className="fade-in" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#10b981', fontSize: '0.85rem', fontWeight: 600 }}>
+                            <CircleCheck size={16} /> Tempo activo
+                          </div>
+                        )}
+                        {tempoConnection === 'error' && (
+                          <div className="fade-in" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#ef4444', fontSize: '0.85rem', fontWeight: 600 }}>
+                            <CircleAlert size={16} /> Token inválido
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="config-section" style={{ padding: '1rem', border: '1px solid var(--latinia-border)', borderRadius: '4px' }}>
                     <h5 style={{ color: 'var(--latinia-teal)', marginBottom: '1rem' }}>SISTEMA</h5>
                     <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>

@@ -2,6 +2,8 @@ import axios from 'axios';
 
 // Usamos un proxy de Vite para evitar problemas de CORS en desarrollo local
 const JIRA_API_URL = '/jira-api';
+// Proxy de Vite para la API de Tempo
+const TEMPO_API_URL = '/tempo-api';
 
 /**
  * Función auxiliar para obtener las cabeceras comunes
@@ -15,6 +17,64 @@ const getJiraHeaders = (email, apiToken) => {
     'X-Atlassian-Token': 'no-check',
     'X-Requested-With': 'XMLHttpRequest'
   };
+};
+
+/**
+ * Función auxiliar para obtener las cabeceras de Tempo (Bearer Auth)
+ */
+const getTempoHeaders = (token) => {
+  return {
+    'Authorization': `Bearer ${token}`,
+    'Accept': 'application/json',
+    'Content-Type': 'application/json'
+  };
+};
+
+/**
+ * Caché en memoria para IDs de Jira Issues -> Keys
+ */
+const issueKeyCache = {};
+
+/**
+ * Resuelve un ID de Issue a su Key (ej: 12345 -> LAT-10) usando la API de Jira
+ */
+const resolveIssueKey = async (email, apiToken, issueId) => {
+  if (issueKeyCache[issueId]) return issueKeyCache[issueId];
+  
+  try {
+    const response = await axios.get(
+      `${JIRA_API_URL}/rest/api/3/issue/${issueId}?fields=key`,
+      { headers: getJiraHeaders(email, apiToken) }
+    );
+    const key = response.data.key;
+    issueKeyCache[issueId] = key;
+    return key;
+  } catch (error) {
+    console.error(`Error resolviendo Key para issue ${issueId}:`, error.message);
+    return `ID-${issueId}`;
+  }
+};
+
+/**
+ * Helper para formatear fechas a YYYY-MM-DD usando la zona horaria local
+ * Esto evita desfases horarios donde el UTC "11 PM de ayer" sea considerado un día diferente.
+ */
+export const formatDateLocal = (date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+/**
+ * Helper para procesar arrays en lotes (chunks) y no saturar el servidor/proxy proxy
+ */
+const chunkArray = (array, size) => {
+  const result = [];
+  for (let i = 0; i < array.length; i += size) {
+    result.push(array.slice(i, i + size));
+  }
+  return result;
 };
 
 /**
@@ -87,62 +147,202 @@ export const logJiraWorklog = async (email, apiToken, issueKey, comment, date, t
  */
 export const fetchJiraWorklogs = async (email, apiToken, date) => {
   try {
-    // 1. Obtener los datos del usuario actual para tener su accountId
     const myself = await validateJiraConnection(email, apiToken);
     const accountId = myself.accountId;
 
-    // 2. Formatear la fecha para JQL: YYYY-MM-DD (usando componentes locales para evitar desfase de zona horaria)
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const dateStr = `${year}-${month}-${day}`;
+    // Si tenemos Token de Tempo, usar la API oficial de Tempo directamente
+    const savedConfig = localStorage.getItem('syncronic_config');
+    const tempoToken = savedConfig ? JSON.parse(savedConfig).tempoToken : null;
+
+    if (tempoToken) {
+      console.log(`[TempoSync] Usando API oficial de Tempo para el total de horas...`);
+      const dateStr = formatDateLocal(date);
+      try {
+        const response = await axios.get(
+          `${TEMPO_API_URL}/4/worklogs/user/${accountId}?from=${dateStr}&to=${dateStr}`,
+          { headers: getTempoHeaders(tempoToken) }
+        );
+        const tempoResults = response.data.results || [];
+        const totalSec = tempoResults.reduce((acc, wl) => acc + wl.timeSpentSeconds, 0);
+        return { totalHours: totalSec / 3600, debugLogs: [] };
+      } catch (e) {
+        console.error(`[TempoSync] Error en API de Tempo, reintentando con Jira API:`, e.message);
+      }
+    }
+
+    const dateStr = formatDateLocal(date);
     console.log(`[JiraSync] Buscando horas para la fecha: ${dateStr} (Local)`);
 
-    // 3. Buscar issues donde el usuario haya imputado horas ese día
-    // Migración a la nueva API /search/jql (POST) para evitar error 410 Gone
-    const jql = `worklogDate = "${dateStr}" AND worklogAuthor = "${accountId}"`;
-    console.log(`[JiraSync] JQL: ${jql}`);
+    // JQL ultra-específico: Solo issues que TIENEN worklogs en esta fecha
+    const jql = `worklogDate = "${dateStr}"`;
+    console.log(`[JiraSync] JQL Optimizado: ${jql}`);
 
     const searchResponse = await axios.post(
       `${JIRA_API_URL}/rest/api/3/search/jql`,
       {
         jql: jql,
-        fields: ["key"],
-        maxResults: 100
+        fields: ["key", "summary"],
+        maxResults: 100 // Ya no necesitamos 200, será una lista corta
       },
       { headers: getJiraHeaders(email, apiToken) }
     );
 
     const issues = searchResponse.data.issues || [];
-    console.log(`[JiraSync] Issues encontrados: ${issues.length}`);
+    console.log(`[JiraSync] Issues encontrados (${issues.length}):`, issues.map(i => `${i.key}: ${i.fields.summary}`));
+
+    // Fetch worklogs with properties in batches to prevent 500 errors from Vite Proxy/Jira API
+    const results = [];
+    const issueChunks = chunkArray(issues, 3); // Lotes más pequeños (3) para mayor estabilidad
+    
+    for (const chunk of issueChunks) {
+      if (results.length > 0) {
+        await new Promise(r => setTimeout(r, 200)); // Pequeña pausa entre lotes
+      }
+      const chunkPromises = chunk.map(async (issue) => {
+        try {
+          const response = await axios.get(
+            `${JIRA_API_URL}/rest/api/3/issue/${issue.key}/worklog?expand=properties`,
+            { headers: getJiraHeaders(email, apiToken) }
+          );
+          return { key: issue.key, worklogs: response.data.worklogs || [] };
+        } catch (err) {
+          console.error(`Error fetching worklogs for ${issue.key}:`, err.message);
+          return { key: issue.key, worklogs: [] };
+        }
+      });
+      const chunkResults = await Promise.all(chunkPromises);
+      results.push(...chunkResults);
+    }
+    
+    // FASE DE DESCUBRIMIENTO: Encontrar el tempo_id y persistirlo
+    let userTempoId = localStorage.getItem('syncronic_tempo_id');
+    
+    // Buscar en los resultados actuales si hay un tempo_id
+    results.forEach(({ worklogs }) => {
+      worklogs.forEach(wl => {
+        if (wl.author?.accountId === accountId) {
+          const tempoProp = wl.properties?.find(p => p.key === 'tempo');
+          if (tempoProp?.value?.tempo_id) {
+            userTempoId = tempoProp.value.tempo_id;
+            localStorage.setItem('syncronic_tempo_id', userTempoId);
+          }
+        }
+      });
+    });
+
+    // FASE DE DEEP DISCOVERY: Si aún no hay tempo_id, buscar en el historial reciente
+    if (!userTempoId) {
+      console.log(`[JiraSync] Tempo ID no encontrado en caché ni resultados actuales. Iniciando Deep Discovery (30d)...`);
+      try {
+        const deepJql = `worklogAuthor = "${accountId}" AND updated >= "-30d" ORDER BY updated DESC`;
+        const deepRes = await axios.post(
+          `${JIRA_API_URL}/rest/api/3/search/jql`,
+          { jql: deepJql, fields: ["key"], maxResults: 10 }, // 10 issues for better reach
+          { headers: getJiraHeaders(email, apiToken) }
+        );
+        const deepIssues = deepRes.data.issues || [];
+        // Deep discovery también en lotes para evitar 500s
+        const issueChunks = chunkArray(deepIssues, 3);
+        for (const chunk of issueChunks) {
+          if (userTempoId) break;
+          const chunkPromises = chunk.map(async (dIssue) => {
+            try {
+              const wlRes = await axios.get(
+                `${JIRA_API_URL}/rest/api/3/issue/${dIssue.key}/worklog?expand=properties`,
+                { headers: getJiraHeaders(email, apiToken) }
+              );
+              const wls = wlRes.data.worklogs || [];
+              for (const wl of wls) {
+                if (wl.author?.accountId === accountId) {
+                  const tempoProp = wl.properties?.find(p => p.key === 'tempo');
+                  if (tempoProp?.value?.tempo_id) {
+                    return tempoProp.value.tempo_id;
+                  }
+                }
+              }
+            } catch (e) {
+              console.error(`Deep fetch falló para ${dIssue.key}:`, e.message);
+            }
+            return null;
+          });
+          
+          const chunkIds = await Promise.all(chunkPromises);
+          userTempoId = chunkIds.find(id => id !== null);
+          if (userTempoId) {
+            localStorage.setItem('syncronic_tempo_id', userTempoId);
+            console.log(`[JiraSync] Deep Discovery Exitoso!`);
+          } else {
+            await new Promise(r => setTimeout(r, 200));
+          }
+        }
+      } catch (e) {
+        console.error(`[JiraSync] Deep Discovery falló:`, e.message);
+      }
+    }
+
+    if (userTempoId) {
+      console.log(`[JiraSync] Huella digital lista! Miguel's Tempo ID: ${userTempoId}`);
+    } else {
+      console.log(`[JiraSync] No se encontró Tempo ID. Se usará coincidencia estricta.`);
+    }
+
+    const debugLogs = [];
     let totalSeconds = 0;
 
-    // 4. Para cada issue, obtener sus worklogs y filtrar los del usuario y fecha
-    for (const issue of issues) {
-      const worklogResponse = await axios.get(
-        `${JIRA_API_URL}/rest/api/3/issue/${issue.key}/worklog`,
-        { headers: getJiraHeaders(email, apiToken) }
-      );
-
-      const worklogs = worklogResponse.data.worklogs || [];
+    for (const { key: issueKey, worklogs } of results) {
       worklogs.forEach(wl => {
-        const wlDate = wl.started.split('T')[0];
-        if (wlDate === dateStr && (wl.author.accountId === accountId || wl.author.emailAddress === email)) {
+        const wlDate = formatDateLocal(new Date(wl.started));
+        if (wlDate !== dateStr) return;
+
+        const isTempoApp = wl.author.accountType === 'app' && 
+                          (wl.author.displayName?.toLowerCase().includes('tempo') || 
+                           wl.author.displayName?.toLowerCase().includes('timesheets') ||
+                           wl.author.displayName?.toLowerCase().includes('global'));
+        
+        // Atribución Robusta (Fingerprint Identity)
+        const isDirectMatch = wl.author.accountId === accountId;
+        const tempoProp = wl.properties?.find(p => p.key === 'tempo');
+        const wlTempoId = tempoProp?.value?.tempo_id;
+        const isTempoMatch = userTempoId && wlTempoId === userTempoId;
+        const isUpdateMatch = wl.updateAuthor?.accountId === accountId;
+
+        const isAuthor = isDirectMatch || isTempoMatch || isUpdateMatch ||
+                         (isTempoApp && wl.properties?.some(p => JSON.stringify(p).includes(accountId)));
+        
+        let matchReason = '';
+        if (isDirectMatch) matchReason = 'Direct Match (accountId)';
+        else if (isTempoMatch) matchReason = `Tempo Identity Match (${wlTempoId})`;
+        else if (isUpdateMatch) matchReason = 'Update Author Match';
+        else if (isTempoApp && wl.properties?.some(p => JSON.stringify(p).includes(accountId))) {
+          matchReason = 'Property Metadata Match';
+        }
+
+        if (isTempoApp && wlDate === dateStr) {
+          console.log(`[JiraSync Debug] Tempo Log en ${issueKey}: Autor Original: ${wl.author.accountId}, UpdateAuthor: ${wl.updateAuthor?.accountId}, TempoProp ID: ${wlTempoId}. ¿Es tuyo?: ${isAuthor}`);
+        }
+
+        debugLogs.push({
+          issue: issueKey,
+          id: wl.id,
+          author: wl.author.displayName,
+          type: wl.author.accountType,
+          time: wl.timeSpentSeconds / 3600,
+          match: isAuthor,
+          reason: matchReason || (isTempoApp ? 'Filtered (Not your account)' : 'Filtered'),
+          rawData: wl
+        });
+
+        if (isAuthor) {
           totalSeconds += wl.timeSpentSeconds;
         }
       });
     }
 
-    return totalSeconds / 3600; // Retornar en horas
+    return {
+      totalHours: totalSeconds / 3600,
+      debugLogs: debugLogs
+    };
   } catch (error) {
-    if (error.response) {
-      console.error("Jira API Error Response Full:", {
-        status: error.response.status,
-        headers: error.response.headers,
-        data: error.response.data,
-        message: error.response.data?.errorMessages || error.response.data?.errors
-      });
-    }
     console.error("Error fetching Jira worklogs:", error);
     throw error;
   }
@@ -156,12 +356,43 @@ export const fetchDetailedWorklogs = async (email, apiToken, date) => {
     const myself = await validateJiraConnection(email, apiToken);
     const accountId = myself.accountId;
 
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const dateStr = `${year}-${month}-${day}`;
+    const savedConfig = localStorage.getItem('syncronic_config');
+    const tempoToken = savedConfig ? JSON.parse(savedConfig).tempoToken : null;
 
-    const jql = `worklogDate = "${dateStr}" AND worklogAuthor = "${accountId}"`;
+    if (tempoToken) {
+      console.log(`[TempoSync] Usando API oficial de Tempo para historial detallado...`);
+      const dateStr = formatDateLocal(date);
+      try {
+        const response = await axios.get(
+          `${TEMPO_API_URL}/4/worklogs/user/${accountId}?from=${dateStr}&to=${dateStr}`,
+          { headers: getTempoHeaders(tempoToken) }
+        );
+        const tempoResults = response.data.results || [];
+        
+        // Mapear Issue IDs a Keys en paralelo
+        const detailed = await Promise.all(tempoResults.map(async (wl) => {
+          const key = await resolveIssueKey(email, apiToken, wl.issue.id);
+          return {
+            id: wl.tempoWorklogId,
+            issueKey: key,
+            issueSummary: wl.description || 'Sincronizado vía Tempo',
+            comment: wl.description || '',
+            timeSpentSeconds: wl.timeSpentSeconds,
+            started: `${wl.startDate}T${wl.startTime}`
+          };
+        }));
+        return detailed;
+      } catch (e) {
+        console.error(`[TempoSync] Error en API de Tempo (historial):`, e.message);
+      }
+    }
+
+    const dateStr = formatDateLocal(date);
+
+    // JQL Optimizado: Solo issues que TENGAN worklogs en esta fecha específica
+    const jql = `worklogDate = "${dateStr}"`;
+    console.log(`[JiraSync] JQL Detallado Optimizado: ${jql}`);
+
     const searchResponse = await axios.post(
       `${JIRA_API_URL}/rest/api/3/search/jql`,
       { jql, fields: ["key", "summary"], maxResults: 100 },
@@ -169,22 +400,108 @@ export const fetchDetailedWorklogs = async (email, apiToken, date) => {
     );
 
     const issues = searchResponse.data.issues || [];
+    
+    // Fetch worklogs with properties in batches to prevent 500 errors
+    const results = [];
+    const issueChunks = chunkArray(issues, 5); // Para el historial acepto 5 por lote
+    
+    for (const chunk of issueChunks) {
+      if (results.length > 0) {
+        await new Promise(r => setTimeout(r, 150));
+      }
+      const chunkPromises = chunk.map(async (issue) => {
+        try {
+          const response = await axios.get(
+            `${JIRA_API_URL}/rest/api/3/issue/${issue.key}/worklog?expand=properties`,
+            { headers: getJiraHeaders(email, apiToken) }
+          );
+          return { 
+            key: issue.key, 
+            summary: issue.fields.summary, 
+            worklogs: response.data.worklogs || [] 
+          };
+        } catch (err) {
+          return { key: issue.key, summary: issue.fields.summary, worklogs: [] };
+        }
+      });
+      const chunkResults = await Promise.all(chunkPromises);
+      results.push(...chunkResults);
+    }
+
+    // FASE DE DESCUBRIMIENTO: Encontrar el tempo_id y persistirlo
+    let userTempoId = localStorage.getItem('syncronic_tempo_id');
+    
+    results.forEach(({ worklogs }) => {
+      worklogs.forEach(wl => {
+        if (wl.author?.accountId === accountId) {
+          const tempoProp = wl.properties?.find(p => p.key === 'tempo');
+          if (tempoProp?.value?.tempo_id) {
+            userTempoId = tempoProp.value.tempo_id;
+            localStorage.setItem('syncronic_tempo_id', userTempoId);
+          }
+        }
+      });
+    });
+
+    // FASE DE DEEP DISCOVERY: Si aún no hay tempo_id, buscar en el historial reciente
+    if (!userTempoId) {
+      try {
+        const deepJql = `worklogAuthor = "${accountId}" AND updated >= "-30d" ORDER BY updated DESC`;
+        const deepRes = await axios.post(
+          `${JIRA_API_URL}/rest/api/3/search/jql`,
+          { jql: deepJql, fields: ["key"], maxResults: 10 },
+          { headers: getJiraHeaders(email, apiToken) }
+        );
+        const deepIssues = deepRes.data.issues || [];
+        for (const dIssue of deepIssues) {
+          if (userTempoId) break;
+          const wlRes = await axios.get(
+            `${JIRA_API_URL}/rest/api/3/issue/${dIssue.key}/worklog?expand=properties`,
+            { headers: getJiraHeaders(email, apiToken) }
+          );
+          const wls = wlRes.data.worklogs || [];
+          for (const wl of wls) {
+            if (wl.author?.accountId === accountId) {
+              const tempoProp = wl.properties?.find(p => p.key === 'tempo');
+              if (tempoProp?.value?.tempo_id) {
+                userTempoId = tempoProp.value.tempo_id;
+                localStorage.setItem('syncronic_tempo_id', userTempoId);
+                break;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Silent catch for history loader
+      }
+    }
+
     const detailedWorklogs = [];
 
-    for (const issue of issues) {
-      const worklogResponse = await axios.get(
-        `${JIRA_API_URL}/rest/api/3/issue/${issue.key}/worklog`,
-        { headers: getJiraHeaders(email, apiToken) }
-      );
-
-      const worklogs = worklogResponse.data.worklogs || [];
+    for (const { key: issueKey, summary, worklogs } of results) {
       worklogs.forEach(wl => {
-        const wlDate = wl.started.split('T')[0];
-        if (wlDate === dateStr && (wl.author.accountId === accountId || wl.author.emailAddress === email)) {
+        const wlDate = formatDateLocal(new Date(wl.started));
+        if (wlDate !== dateStr) return;
+
+        const isTempoApp = wl.author.accountType === 'app' && 
+                          (wl.author.displayName?.toLowerCase().includes('tempo') || 
+                           wl.author.displayName?.toLowerCase().includes('timesheets') ||
+                           wl.author.displayName?.toLowerCase().includes('global'));
+        
+        const isDirectMatch = wl.author.accountId === accountId;
+        const tempoProp = wl.properties?.find(p => p.key === 'tempo');
+        const wlTempoId = tempoProp?.value?.tempo_id;
+        const isTempoMatch = userTempoId && wlTempoId === userTempoId;
+        const isUpdateMatch = wl.updateAuthor?.accountId === accountId;
+
+        const isAuthor = isDirectMatch || isTempoMatch || isUpdateMatch ||
+                         (isTempoApp && wl.properties?.some(p => JSON.stringify(p).includes(accountId)));
+
+        if (isAuthor) {
           detailedWorklogs.push({
             id: wl.id,
-            issueKey: issue.key,
-            issueSummary: issue.fields.summary,
+            issueKey: issueKey,
+            issueSummary: summary,
             comment: wl.comment?.content?.[0]?.content?.[0]?.text || '',
             timeSpentSeconds: wl.timeSpentSeconds,
             started: wl.started
@@ -201,9 +518,14 @@ export const fetchDetailedWorklogs = async (email, apiToken, date) => {
 };
 
 /**
- * Actualiza un worklog existente en Jira
+ * Actualiza un worklog existente en Jira o Tempo según sea necesario
  */
 export const updateJiraWorklog = async (email, apiToken, issueKey, worklogId, comment, timeSpentSeconds) => {
+  const savedConfig = localStorage.getItem('syncronic_config');
+  const tempoConfig = savedConfig ? JSON.parse(savedConfig) : null;
+  const tempoToken = tempoConfig?.tempoToken;
+
+  // Intento 1: API de Jira (Tradicional)
   try {
     const response = await axios.put(
       `${JIRA_API_URL}/rest/api/3/issue/${issueKey}/worklog/${worklogId}`,
@@ -222,15 +544,38 @@ export const updateJiraWorklog = async (email, apiToken, issueKey, worklogId, co
     );
     return response.data;
   } catch (error) {
+    // Si falla con 404 y tenemos token de Tempo, intentamos vía Tempo
+    if (error.response?.status === 404 && tempoToken) {
+      console.log(`[Syncronic] 404 en Jira al actualizar ${worklogId}, reintentando vía API de Tempo...`);
+      try {
+        // En Tempo API v4, el body es distinto
+        const response = await axios.put(
+          `${TEMPO_API_URL}/4/worklogs/${worklogId}`,
+          {
+            description: comment,
+            timeSpentSeconds: timeSpentSeconds
+          },
+          { headers: getTempoHeaders(tempoToken) }
+        );
+        return response.data;
+      } catch (tempoError) {
+        console.error("Error updating via Tempo API:", tempoError.message);
+        throw tempoError;
+      }
+    }
     console.error("Error updating Jira worklog:", error);
     throw error;
   }
 };
 
 /**
- * Elimina un worklog de Jira
+ * Elimina un worklog de Jira o Tempo según sea necesario
  */
 export const deleteJiraWorklog = async (email, apiToken, issueKey, worklogId) => {
+  const savedConfig = localStorage.getItem('syncronic_config');
+  const tempoToken = savedConfig ? JSON.parse(savedConfig).tempoToken : null;
+
+  // Intento 1: API de Jira (Tradicional)
   try {
     await axios.delete(
       `${JIRA_API_URL}/rest/api/3/issue/${issueKey}/worklog/${worklogId}`,
@@ -238,6 +583,20 @@ export const deleteJiraWorklog = async (email, apiToken, issueKey, worklogId) =>
     );
     return true;
   } catch (error) {
+    // Si falla con 404 y tenemos token de Tempo, intentamos vía Tempo
+    if (error.response?.status === 404 && tempoToken) {
+      console.log(`[Syncronic] 404 en Jira para ${worklogId}, reintentando vía API de Tempo...`);
+      try {
+        await axios.delete(
+          `${TEMPO_API_URL}/4/worklogs/${worklogId}`,
+          { headers: getTempoHeaders(tempoToken) }
+        );
+        return true;
+      } catch (tempoError) {
+        console.error("Error deleting via Tempo API:", tempoError.message);
+        throw tempoError;
+      }
+    }
     console.error("Error deleting Jira worklog:", error);
     throw error;
   }

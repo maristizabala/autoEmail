@@ -19,6 +19,18 @@ export default defineConfig({
             proxyReq.setHeader('X-Requested-With', 'XMLHttpRequest');
           });
         }
+      },
+      '/tempo-api': {
+        target: 'https://api.tempo.io',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/tempo-api/, ''),
+        configure: (proxy, options) => {
+          proxy.on('proxyReq', (proxyReq, req, res) => {
+            const target = 'https://api.tempo.io';
+            proxyReq.setHeader('Origin', target);
+            proxyReq.setHeader('Referer', target + '/');
+          });
+        }
       }
     }
   }
