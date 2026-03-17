@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/maristizabala/autoEmail/compare/v1.0.1...v1.1.0) (2026-03-17)
+
+
+### Features
+
+* se guardan las credenciales en el navegador y se mantiene la persistencia de cuerpo del correo electronico ([a133f6d](https://github.com/maristizabala/autoEmail/commit/a133f6d1bbc4752415d12983dff00a9465e9e1c3))
+
 ## [1.0.1](https://github.com/maristizabala/autoEmail/compare/v1.0.0...v1.0.1) (2026-03-17)
 
 
