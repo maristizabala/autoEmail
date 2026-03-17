@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/maristizabala/autoEmail/compare/v1.0.0...v1.0.1) (2026-03-17)
+
+
+### Bug Fixes
+
+* no se estaba identificando el token de tempo cloud ([ff16e89](https://github.com/maristizabala/autoEmail/commit/ff16e898900939e24e9ea7ae427cf50eb4f4f75f))
+
 ## 1.0.0 (2026-03-17)
 
 
