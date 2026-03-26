@@ -296,9 +296,15 @@ function App() {
   const [totalDayHours, setTotalDayHours] = useState(0)
 
   const [config, setConfig] = useState(() => {
-    const saved = localStorage.getItem('syncronic_config')
+    const newKey = 'autoreport_config'
+    const oldKey = 'syncronic_config'
+    const saved = localStorage.getItem(newKey) || localStorage.getItem(oldKey)
     const baseConfig = { jiraEmail: '', jiraToken: '', tempoToken: '' }
-    return saved ? { ...baseConfig, ...JSON.parse(saved) } : baseConfig
+    const parsed = saved ? { ...baseConfig, ...JSON.parse(saved) } : baseConfig
+    if (!localStorage.getItem(newKey) && localStorage.getItem(oldKey)) {
+      localStorage.setItem(newKey, JSON.stringify(parsed))
+    }
+    return parsed
   })
 
   // Estado para el historial de la semana
@@ -307,8 +313,14 @@ function App() {
 
   // Nuevos estados para recordatorios
   const [reminderSettings, setReminderSettings] = useState(() => {
-    const saved = localStorage.getItem('syncronic_reminders')
-    return saved ? JSON.parse(saved) : { enabled: false, interval: 60, shiftEndTime: '17:00' }
+    const newKey = 'autoreport_reminders'
+    const oldKey = 'syncronic_reminders'
+    const saved = localStorage.getItem(newKey) || localStorage.getItem(oldKey)
+    const parsed = saved ? JSON.parse(saved) : { enabled: false, interval: 60, shiftEndTime: '17:00' }
+    if (!localStorage.getItem(newKey) && localStorage.getItem(oldKey)) {
+      localStorage.setItem(newKey, JSON.stringify(parsed))
+    }
+    return parsed
   })
 
   const [jiraConnected, setJiraConnected] = useState(false)
@@ -318,13 +330,18 @@ function App() {
   useEffect(() => {
     // Intentar cargar borrador guardado para este día
     const dateStr = formatDateLocal(selectedDay)
-    const savedDraft = localStorage.getItem(`syncronic_draft_${dateStr}`)
+    const newKey = `autoreport_draft_${dateStr}`
+    const oldKey = `syncronic_draft_${dateStr}`
+    const savedDraft = localStorage.getItem(newKey) || localStorage.getItem(oldKey)
     
     if (savedDraft) {
       try {
         const { body, activities: savedActivities } = JSON.parse(savedDraft)
         setEditableBody(body)
         setActivities(savedActivities)
+        if (!localStorage.getItem(newKey) && localStorage.getItem(oldKey)) {
+          localStorage.setItem(newKey, savedDraft)
+        }
       } catch (e) {
         console.error("Error al cargar el borrador guardado:", e)
       }
@@ -360,7 +377,7 @@ function App() {
     }
     // Solo guardar si hay algo relevante para evitar llenar el storage con vacíos
     if (editableBody || (activities.length > 0 && activities[0].issueKey)) {
-      localStorage.setItem(`syncronic_draft_${dateStr}`, JSON.stringify(draft))
+      localStorage.setItem(`autoreport_draft_${dateStr}`, JSON.stringify(draft))
     }
   }, [editableBody, activities, selectedDay])
 
@@ -396,11 +413,11 @@ function App() {
   }
 
   useEffect(() => {
-    localStorage.setItem('syncronic_config', JSON.stringify(config))
+    localStorage.setItem('autoreport_config', JSON.stringify(config))
   }, [config])
 
   useEffect(() => {
-    localStorage.setItem('syncronic_reminders', JSON.stringify(reminderSettings))
+    localStorage.setItem('autoreport_reminders', JSON.stringify(reminderSettings))
   }, [reminderSettings])
 
   const handleToggleReminders = (enabled) => {
@@ -425,7 +442,7 @@ function App() {
 
       // Log de depuración cada segundo para asegurar que el sistema está vivo
       if (now.getSeconds() === 0) {
-        console.log(`[Syncronic] Verificando: ${now.toLocaleTimeString()} | Fin: ${reminderSettings.shiftEndTime} | Intervalo: ${reminderSettings.interval}m | Horas: ${totalDayHours}h`)
+        console.log(`[AutoReport] Verificando: ${now.toLocaleTimeString()} | Fin: ${reminderSettings.shiftEndTime} | Intervalo: ${reminderSettings.interval}m | Horas: ${totalDayHours}h`)
       }
 
       // 1. Notificación de fin de jornada (10 min antes)
@@ -450,13 +467,13 @@ function App() {
         
         // Verificación de condiciones para el trigger periódico
         if (diffToFinish <= 15) {
-          console.log(`[Syncronic] Trigger periódico omitido: Muy cerca del fin de jornada (${Math.round(diffToFinish)} min restantes).`)
+          console.log(`[AutoReport] Trigger periódico omitido: Muy cerca del fin de jornada (${Math.round(diffToFinish)} min restantes).`)
         } else if (totalDayHours >= 8) {
-          console.log(`[Syncronic] Trigger periódico omitido: Ya tienes ${totalDayHours}h imputadas.`)
+          console.log(`[AutoReport] Trigger periódico omitido: Ya tienes ${totalDayHours}h imputadas.`)
         } else {
           if (Notification.permission === 'granted') {
             console.log("Trigger: Notificación periódica.")
-            new Notification("Recordatorio Syncronic", {
+            new Notification("Recordatorio AutoReport", {
               body: "¿Tienes actividades pendientes por imputar? Aprovecha ahora.",
               icon: "/logo.png"
             })
@@ -530,10 +547,57 @@ function App() {
     setLoading(true)
     try {
       if (jiraConnection === 'success') {
+        const myself = await validateJiraConnection(config.jiraEmail, config.jiraToken);
+        const accountId = myself.accountId;
+        const jiraTimeZone = myself.timeZone || 'UTC';
+        const usingTempo = !!(config.tempoToken && accountId);
+        
+        // Calcular el desfase entre el navegador y el perfil de Jira
+        const getOffset = (tz) => {
+          const d = new Date();
+          const utc = new Date(d.toLocaleString('en-US', { timeZone: 'UTC' }));
+          const target = new Date(d.toLocaleString('en-US', { timeZone: tz }));
+          return Math.round((target.getTime() - utc.getTime()) / 60000);
+        };
+        
+        const browserOffset = -new Date().getTimezoneOffset(); // en minutos
+        const jiraOffset = getOffset(jiraTimeZone);
+        const offsetDiffMinutes = jiraOffset - browserOffset;
+        
+
+        // Iniciar la secuencia de horas a las 08:00 AM del día seleccionado
+        let currentStartTime = new Date(selectedDay);
+        
+        if (!usingTempo && offsetDiffMinutes !== 0) {
+          // Si usamos Jira API, ajustamos el inicio para compensar el desfase del perfil
+          // Si Jira está +6h por delante (España vs Colombia), restamos 6h al inicio local
+          currentStartTime.setHours(8, 0, 0, 0);
+          currentStartTime = new Date(currentStartTime.getTime() - (offsetDiffMinutes * 60 * 1000));
+        } else {
+          // Si usamos Tempo o coinciden, iniciamos a las 08:00 AM local sin más
+          currentStartTime.setHours(8, 0, 0, 0);
+        }
+
         for (const activity of validActivities) {
           const seconds = Math.round((parseFloat(activity.hours) || 1) * 3600)
-          await logJiraWorklog(config.jiraEmail, config.jiraToken, activity.issueKey, activity.report, selectedDay, seconds)
+          
+          // Clonar para evitar problemas de referencia y formatear para Jira
+          const taskDate = new Date(currentStartTime.getTime());
+          await logJiraWorklog(
+            config.jiraEmail, 
+            config.jiraToken, 
+            activity.issueKey, 
+            activity.report, 
+            taskDate, 
+            seconds,
+            config.tempoToken,
+            accountId
+          )
+          
+          // Avanzar el puntero de tiempo para la siguiente actividad
+          currentStartTime = new Date(currentStartTime.getTime() + seconds * 1000);
         }
+
       } else {
         console.warn("Jira no está conectado. Solo se actualizará el reporte local.")
       }
@@ -618,7 +682,7 @@ function App() {
           <img src="/logo.png" alt="Latinia" style={{ height: '60px', width: 'auto', pointerEvents: 'none' }} />
         </div>
         <div style={{ flex: 1, paddingLeft: '1.5rem', fontSize: '1.8rem', fontWeight: 800, letterSpacing: '-0.5px', color: 'white', display: 'flex', alignItems: 'center' }}>
-          Syncronic
+          AutoReport
         </div>
       </header>
 
@@ -635,7 +699,7 @@ function App() {
         </a>
         <div style={{ marginTop: 'auto', padding: '1rem 1.5rem', borderTop: '1px solid var(--latinia-border)' }}>
           <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-            Syncronic v1.0
+            AutoReport v1.0
           </div>
         </div>
       </aside>
@@ -646,7 +710,7 @@ function App() {
           <div className="breadcrumbs">
             <Home size={16} />
             <ChevronRight size={14} className="breadcrumb-separator" />
-            <span>Syncronic</span>
+            <span>AutoReport</span>
             {activeTab === 'config' && (
               <>
                 <ChevronRight size={14} className="breadcrumb-separator" />

@@ -96,43 +96,72 @@ export const validateJiraConnection = async (email, apiToken) => {
 };
 
 /**
- * Registra un worklog en Jira (Tempo)
+ * Registra un worklog en Jira o Tempo según disponibilidad de tokens
  * @param {Date} date - La fecha en la que se realizó el trabajo
  */
-export const logJiraWorklog = async (email, apiToken, issueKey, comment, date, timeSpentSeconds = 3600) => {
-  try {
-    // Formatear la fecha para Jira: YYYY-MM-DDThh:mm:ss.sssZ
-    // Usamos las 09:00 AM del día seleccionado como hora de inicio por defecto
-    const startedDate = new Date(date);
-    startedDate.setHours(9, 0, 0, 0);
-    const started = startedDate.toISOString().replace('Z', '+0000');
+export const logJiraWorklog = async (email, apiToken, issueKey, comment, date, timeSpentSeconds = 3600, tempoToken = null, accountId = null) => {
+  // Formatear tiempos
+  const pad = (num) => String(num).padStart(2, '0');
+  const offset = -date.getTimezoneOffset();
+  const dif = offset >= 0 ? '+' : '-';
+  const offsetH = pad(Math.floor(Math.abs(offset) / 60));
+  const offsetM = pad(Math.abs(offset) % 60);
+  
+  const isoWithOffset = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.000${dif}${offsetH}${offsetM}`;
+  
+  // Si tenemos token de Tempo y accountId, usamos la API oficial de Tempo para mayor precisión
+  if (tempoToken && accountId) {
+    try {
+      // Tempo v4 a menudo requiere el ID numérico del issue, no la Key.
+      // Lo obtenemos de Jira primero.
+      const issueRes = await axios.get(
+        `${JIRA_API_URL}/rest/api/3/issue/${issueKey}?fields=id`,
+        { headers: getJiraHeaders(email, apiToken) }
+      );
+      const issueId = issueRes.data.id;
+      
+      const startDate = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+      const startTime = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+      
+      const response = await axios.post(
+        `${TEMPO_API_URL}/4/worklogs`,
+        {
+          issueId: parseInt(issueId), // Usar ID numérico
+          authorAccountId: accountId,
+          description: comment,
+          startDate: startDate,
+          startTime: startTime,
+          timeSpentSeconds: timeSpentSeconds
+        },
+        { headers: getTempoHeaders(tempoToken) }
+      );
+      return response.data;
+    } catch (e) {
+      const errorData = e.response?.data;
+      console.error("[TempoSync] Falló el registro en Tempo:", errorData || e.message);
+      // Fallthrough al código de abajo para reintentar con Jira API si Tempo falla
+    }
+  }
 
+  // Fallback: API tradicional de Jira
+  try {
+    const started = isoWithOffset;
     const response = await axios.post(
       `${JIRA_API_URL}/rest/api/3/issue/${issueKey}/worklog`,
       {
         comment: {
           type: "doc",
           version: 1,
-          content: [
-            {
-              type: "paragraph",
-              content: [
-                {
-                  type: "text",
-                  text: comment
-                }
-              ]
-            }
-          ]
+          content: [{
+            type: "paragraph",
+            content: [{ type: "text", text: comment }]
+          }]
         },
         timeSpentSeconds: timeSpentSeconds,
         started: started
       },
-      {
-        headers: getJiraHeaders(email, apiToken)
-      }
+      { headers: getJiraHeaders(email, apiToken) }
     );
-
     return response.data;
   } catch (error) {
     if (error.response && error.response.data) {
@@ -151,7 +180,7 @@ export const fetchJiraWorklogs = async (email, apiToken, date) => {
     const accountId = myself.accountId;
 
     // Si tenemos Token de Tempo, usar la API oficial de Tempo directamente
-    const savedConfig = localStorage.getItem('syncronic_config');
+    const savedConfig = localStorage.getItem('autoreport_config') || localStorage.getItem('syncronic_config');
     const tempoToken = savedConfig ? JSON.parse(savedConfig).tempoToken : null;
 
     if (tempoToken) {
@@ -215,7 +244,7 @@ export const fetchJiraWorklogs = async (email, apiToken, date) => {
     }
     
     // FASE DE DESCUBRIMIENTO: Encontrar el tempo_id y persistirlo
-    let userTempoId = localStorage.getItem('syncronic_tempo_id');
+    let userTempoId = localStorage.getItem('autoreport_tempo_id') || localStorage.getItem('syncronic_tempo_id');
     
     // Buscar en los resultados actuales si hay un tempo_id
     results.forEach(({ worklogs }) => {
@@ -224,7 +253,7 @@ export const fetchJiraWorklogs = async (email, apiToken, date) => {
           const tempoProp = wl.properties?.find(p => p.key === 'tempo');
           if (tempoProp?.value?.tempo_id) {
             userTempoId = tempoProp.value.tempo_id;
-            localStorage.setItem('syncronic_tempo_id', userTempoId);
+            localStorage.setItem('autoreport_tempo_id', userTempoId);
           }
         }
       });
@@ -269,7 +298,7 @@ export const fetchJiraWorklogs = async (email, apiToken, date) => {
           const chunkIds = await Promise.all(chunkPromises);
           userTempoId = chunkIds.find(id => id !== null);
           if (userTempoId) {
-            localStorage.setItem('syncronic_tempo_id', userTempoId);
+            localStorage.setItem('autoreport_tempo_id', userTempoId);
             console.log(`[JiraSync] Deep Discovery Exitoso!`);
           } else {
             await new Promise(r => setTimeout(r, 200));
@@ -356,7 +385,7 @@ export const fetchDetailedWorklogs = async (email, apiToken, date) => {
     const myself = await validateJiraConnection(email, apiToken);
     const accountId = myself.accountId;
 
-    const savedConfig = localStorage.getItem('syncronic_config');
+    const savedConfig = localStorage.getItem('autoreport_config') || localStorage.getItem('syncronic_config');
     const tempoToken = savedConfig ? JSON.parse(savedConfig).tempoToken : null;
 
     if (tempoToken) {
@@ -430,7 +459,7 @@ export const fetchDetailedWorklogs = async (email, apiToken, date) => {
     }
 
     // FASE DE DESCUBRIMIENTO: Encontrar el tempo_id y persistirlo
-    let userTempoId = localStorage.getItem('syncronic_tempo_id');
+    let userTempoId = localStorage.getItem('autoreport_tempo_id') || localStorage.getItem('syncronic_tempo_id');
     
     results.forEach(({ worklogs }) => {
       worklogs.forEach(wl => {
@@ -438,7 +467,7 @@ export const fetchDetailedWorklogs = async (email, apiToken, date) => {
           const tempoProp = wl.properties?.find(p => p.key === 'tempo');
           if (tempoProp?.value?.tempo_id) {
             userTempoId = tempoProp.value.tempo_id;
-            localStorage.setItem('syncronic_tempo_id', userTempoId);
+            localStorage.setItem('autoreport_tempo_id', userTempoId);
           }
         }
       });
@@ -466,7 +495,7 @@ export const fetchDetailedWorklogs = async (email, apiToken, date) => {
               const tempoProp = wl.properties?.find(p => p.key === 'tempo');
               if (tempoProp?.value?.tempo_id) {
                 userTempoId = tempoProp.value.tempo_id;
-                localStorage.setItem('syncronic_tempo_id', userTempoId);
+                localStorage.setItem('autoreport_tempo_id', userTempoId);
                 break;
               }
             }
@@ -523,7 +552,7 @@ export const fetchDetailedWorklogs = async (email, apiToken, date) => {
  * Actualiza un worklog existente en Jira o Tempo según sea necesario
  */
 export const updateJiraWorklog = async (email, apiToken, issueKey, worklogId, comment, timeSpentSeconds, startDate, authorAccountId) => {
-  const savedConfig = localStorage.getItem('syncronic_config');
+  const savedConfig = localStorage.getItem('autoreport_config') || localStorage.getItem('syncronic_config');
   const tempoConfig = savedConfig ? JSON.parse(savedConfig) : null;
   const tempoToken = tempoConfig?.tempoToken;
 
@@ -548,11 +577,11 @@ export const updateJiraWorklog = async (email, apiToken, issueKey, worklogId, co
   } catch (error) {
     // Si falla con 404 (indicativo de que es un worklog de Tempo) y tenemos token de Tempo
     if (error.response?.status === 404 && tempoToken) {
-      console.log(`[Syncronic] 404 en Jira al actualizar ${worklogId}, reintentando vía API de Tempo...`);
+      console.log(`[AutoReport] 404 en Jira al actualizar ${worklogId}, reintentando vía API de Tempo...`);
       
       // Para Tempo PUT necesitamos: authorAccountId, description, startDate, timeSpentSeconds
       if (!authorAccountId || !startDate) {
-        console.warn("[Syncronic] Faltan datos (authorAccountId o startDate) para reintento en Tempo.");
+        console.warn("[AutoReport] Faltan datos (authorAccountId o startDate) para reintento en Tempo.");
         throw error; // Re-lanzar el error original de Jira si no tenemos datos para Tempo
       }
 
@@ -585,7 +614,7 @@ export const updateJiraWorklog = async (email, apiToken, issueKey, worklogId, co
  * Elimina un worklog de Jira o Tempo según sea necesario
  */
 export const deleteJiraWorklog = async (email, apiToken, issueKey, worklogId) => {
-  const savedConfig = localStorage.getItem('syncronic_config');
+  const savedConfig = localStorage.getItem('autoreport_config') || localStorage.getItem('syncronic_config');
   const tempoToken = savedConfig ? JSON.parse(savedConfig).tempoToken : null;
 
   // Intento 1: API de Jira (Tradicional)
@@ -598,7 +627,7 @@ export const deleteJiraWorklog = async (email, apiToken, issueKey, worklogId) =>
   } catch (error) {
     // Si falla con 404 y tenemos token de Tempo, intentamos vía Tempo
     if (error.response?.status === 404 && tempoToken) {
-      console.log(`[Syncronic] 404 en Jira para ${worklogId}, reintentando vía API de Tempo...`);
+      console.log(`[AutoReport] 404 en Jira para ${worklogId}, reintentando vía API de Tempo...`);
       try {
         await axios.delete(
           `${TEMPO_API_URL}/4/worklogs/${worklogId}`,
